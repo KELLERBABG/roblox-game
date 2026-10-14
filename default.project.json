@@ -1,0 +1,40 @@
+{
+  "name": "RNGIdleAuraCollector",
+  "emitLegacyScripts": true,
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "Shared": {
+        "$path": "src/shared"
+      },
+      "Visuals": {
+        "$path": "Visuals"
+      }
+    },
+
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "Server": {
+        "$path": "src/server"
+      },
+      "VisualsServer": {
+        "$path": "Visuals/Server"
+      }
+    },
+
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "Client": {
+          "$path": "src/client"
+        },
+        "VisualsClient": {
+          "$path": "Visuals/Client"
+        }
+      }
+    }
+  }
+}

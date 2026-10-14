@@ -1,0 +1,57 @@
+{
+  "name": "PlaytestPlace",
+  "emitLegacyScripts": true,
+  "tree": {
+    "$className": "DataModel",
+
+    "Workspace": {
+      "$className": "Workspace",
+
+      "Baseplate": {
+        "$className": "Part",
+        "$properties": {
+          "Size": [512, 20, 512],
+          "Position": [0, -10, 0],
+          "Anchored": true,
+          "Locked": true,
+          "Color": [0.639, 0.635, 0.647]
+        }
+      },
+
+      "SpawnLocation": {
+        "$className": "SpawnLocation",
+        "$properties": {
+          "Size": [12, 1, 12],
+          "Position": [0, 1, 0],
+          "Anchored": true,
+          "Neutral": true,
+          "Duration": 0
+        }
+      }
+    },
+
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "Shared": {
+        "$path": "src/shared"
+      }
+    },
+
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "Server": {
+        "$path": "src/server"
+      }
+    },
+
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "Client": {
+          "$path": "src/client"
+        }
+      }
+    }
+  }
+}
