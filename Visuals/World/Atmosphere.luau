@@ -28,13 +28,29 @@ function Atmosphere.ApplyLighting(): ()
 	Lighting.GlobalShadows = true
 	Lighting.ShadowSoftness = 0.25
 
-	-- High-Density Starfield Sky
+	-- High-Resolution 4K Nebula Space Skybox
 	local existingSky = Lighting:FindFirstChildOfClass("Sky")
 	local sky = existingSky or Instance.new("Sky")
+	sky.Name = "CelestialNebulaSky"
+	sky.SkyboxBk = "rbxassetid://171410628"
+	sky.SkyboxDn = "rbxassetid://171410649"
+	sky.SkyboxFt = "rbxassetid://171410620"
+	sky.SkyboxLf = "rbxassetid://171410666"
+	sky.SkyboxRt = "rbxassetid://171410657"
+	sky.SkyboxUp = "rbxassetid://171410636"
 	sky.StarCount = 5000
 	sky.MoonAngularSize = 14
 	sky.CelestialBodiesShown = true
 	sky.Parent = Lighting
+
+	-- Ethereal Celestial God-Rays (Moonlight Beams)
+	local existingSunRays = Lighting:FindFirstChildOfClass("SunRaysEffect")
+	local sunRays = (existingSunRays or Instance.new("SunRaysEffect")) :: SunRaysEffect
+	sunRays.Name = "CelestialSunRays"
+	sunRays.Intensity = 0.16
+	sunRays.Spread = 0.72
+	sunRays.Enabled = true
+	sunRays.Parent = Lighting
 
 	-- Dreamy Deep-Indigo Horizon Haze
 	local existingAtmo = Lighting:FindFirstChildOfClass("Atmosphere")

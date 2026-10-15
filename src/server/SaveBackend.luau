@@ -159,6 +159,190 @@ function SaveBackend.Get(storeName: string): Backend
 end
 
 -- =============================================================================
+-- Ordered backends (leaderboards)
+-- =============================================================================
+
+--[[
+	An ORDERED store is a different API and a different budget from the key/value
+	one above: one integer per key, and reads come back sorted. It gets the same
+	policy, though - a DataStore when it works, memory when it does not - so a
+	Studio session without API access shows this session's board instead of an
+error, exactly like the saves do.
+
+	The memory fallback is the harness's subject: `test_perks` exercises it as the
+	"no DataStore" case (submitting, ordering, the bound, ties) without a Roblox
+	runtime, which is the only way that path is ever executed before Studio.
+]]
+export type OrderedRow = { key: string, value: number }
+
+export type OrderedBackend = {
+	kind: string,
+	-- One score. `true` when it was recorded; a DataStore write can legitimately
+	-- fail (a rate limit), and the caller keeps a session copy either way.
+	submit: (key: string, score: number) -> boolean,
+	--[[
+		The highest `count` entries, highest first, ties broken by key ascending so
+		two runs of the same data cannot disagree about the order.
+
+		`nil` means THE READ FAILED - which is not the same as an empty board, and the
+		difference matters: a caller that replaced a good board with `{}` on a
+		transient store error would show an empty leaderboard during an outage and
+		call it read. An in-memory board never fails, so it always returns a table.
+	]]
+	top: (count: number) -> { OrderedRow }?,
+}
+
+local function sanitizeScore(value: any): number
+	if type(value) ~= "number" or value ~= value then
+		return 0
+	end
+	if value == math.huge then
+		return 0
+	end
+	local whole = math.floor(value)
+	if whole < 0 then
+		return 0
+	end
+	return whole
+end
+
+local function rankRows(rows: { OrderedRow }, count: number): { OrderedRow }
+	table.sort(rows, function(left: OrderedRow, right: OrderedRow): boolean
+		if left.value ~= right.value then
+			return left.value > right.value
+		end
+		-- A tie is broken by the KEY, ascending, which is the only part of a row that
+		-- is stable: two reads of the same data must not disagree about the order of
+		-- two equal scores.
+		return left.key < right.key
+	end)
+
+	local bounded: { OrderedRow } = {}
+	for index = 1, count do
+		local row = rows[index]
+		if row == nil then
+			break
+		end
+		bounded[index] = row
+	end
+	return bounded
+end
+
+local function createMemoryOrderedBackend(storeName: string): OrderedBackend
+	local memoryScores: { [string]: number } = {}
+
+	return {
+		kind = string.format("Memory(%s/ordered-unavailable)", storeName),
+		submit = function(key: string, score: number): boolean
+			if type(key) ~= "string" or key == "" then
+				return false
+			end
+			local safe = sanitizeScore(score)
+			local existing = memoryScores[key]
+			-- Never lower a recorded score: a board that can move DOWN when a store
+			-- read fails would look like a demotion rather than a stale value.
+			if existing == nil or safe > existing then
+				memoryScores[key] = safe
+			end
+			return true
+		end,
+		top = function(count: number): { OrderedRow }
+			local rows: { OrderedRow } = {}
+			for key, value in pairs(memoryScores) do
+				table.insert(rows, { key = key, value = value })
+			end
+			return rankRows(rows, math.max(0, math.floor(count)))
+		end,
+	}
+end
+
+local function createDataStoreOrderedBackend(storeName: string): OrderedBackend?
+	local service = getDataStoreService()
+	if service == nil then
+		return nil
+	end
+
+	local ok, store = pcall(function()
+		return service:GetOrderedDataStore(storeName)
+	end)
+	if not ok or store == nil then
+		return nil
+	end
+
+	local orderedStore: any = store
+
+	return {
+		kind = "OrderedDataStore",
+		submit = function(key: string, score: number): boolean
+			if type(key) ~= "string" or key == "" then
+				return false
+			end
+			local success = pcall(function()
+				orderedStore:SetAsync(key, sanitizeScore(score))
+			end)
+			if not success then
+				if not warnedAboutDataStore then
+					warnedAboutDataStore = true
+					warn(string.format(
+						"[SaveBackend] Ordered write failed for %s (Studio API access off, or rate limited). "
+							.. "The session's board stays in memory.",
+						storeName
+					))
+				end
+				return false
+			end
+			return true
+		end,
+		top = function(count: number): { OrderedRow }
+			local wanted = math.max(0, math.floor(count))
+			if wanted == 0 then
+				return {}
+			end
+
+			local rows: { OrderedRow } = {}
+			local success = pcall(function()
+				-- ascending = false: highest first. Page size is the bound we want, so
+				-- the read cannot pull the whole store into memory.
+				local pages = orderedStore:GetSortedAsync(false, wanted)
+				for _, row in ipairs(pages:GetCurrentPage()) do
+					if type(row) == "table" and type(row.key) == "string" then
+						table.insert(rows, { key = row.key, value = sanitizeScore(row.value) })
+					end
+				end
+			end)
+			if not success then
+				if not warnedAboutDataStore then
+					warnedAboutDataStore = true
+					warn(string.format(
+						"[SaveBackend] Ordered read failed for %s; the last board read stays in use.",
+						storeName
+					))
+				end
+				-- NOT an empty board: the caller keeps whatever it last read.
+				return nil
+			end
+			return rankRows(rows, wanted)
+		end,
+	}
+end
+
+local orderedBackends: { [string]: OrderedBackend } = {}
+
+-- One ordered backend per store name, same lazy selection as `Get`, so a failure
+-- to open one store never blocks another.
+function SaveBackend.GetOrdered(storeName: string): OrderedBackend
+	local cached = orderedBackends[storeName]
+	if cached ~= nil then
+		return cached
+	end
+
+	local dataStoreBackend = createDataStoreOrderedBackend(storeName)
+	local backend = if dataStoreBackend ~= nil then dataStoreBackend else createMemoryOrderedBackend(storeName)
+	orderedBackends[storeName] = backend
+	return backend
+end
+
+-- =============================================================================
 -- Receipt claims (idempotency)
 -- =============================================================================
 

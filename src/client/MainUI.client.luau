@@ -19,7 +19,16 @@
 	                    guarantee on its own line, and the server-owned session
 	                    streak with its progress bar; the global pull banner flies
 	                    in below it
-	  * Left          : scrollable collection grid; click an owned aura to equip
+	  * Top right     : the Top Rollers board - the server's persisted board with
+	                    this session's players folded in. It prints no rows and no
+	                    zeroes until the server says it has actually read one
+	  * Left          : the inventory drawer - the collection grid (equip, or delete
+	                    one copy) and the auto-filter control - which lives in
+	                    `InventoryUI`; this file only mounts it
+
+The Luck Shrine's status is a row on the pity panel (see `updateShrineView`): the
++15% and the seconds it buys are the server's numbers, and the client never claims
+to be inside a zone the server has not placed it in.
 ]]
 
 local Players = game:GetService("Players")
@@ -29,6 +38,9 @@ local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
+-- Used only to mark this player's own row on the Top Rollers board. The board
+-- itself comes from the server; this is a display concern, not a claim.
+local localUserId: number = player.UserId
 
 -- =============================================================================
 -- Shared modules & remotes
@@ -50,6 +62,7 @@ local AuraRegistry: any = require(auraRegistryModule :: ModuleScript)
 local RollMath: any = require(rollMathModule :: ModuleScript)
 local ProceduralVFX: any = require(script.Parent:WaitForChild("ProceduralVFX") :: ModuleScript)
 local ShopUI: any = require(script.Parent:WaitForChild("ShopUI") :: ModuleScript)
+local InventoryUI: any = require(script.Parent:WaitForChild("InventoryUI") :: ModuleScript)
 
 local remotesInstance = ReplicatedStorage:WaitForChild("Remotes", 60)
 if remotesInstance == nil then
@@ -60,7 +73,6 @@ local Remotes = remotesInstance :: Folder
 local RequestRoll = Remotes:WaitForChild("RequestRoll", 30) :: RemoteFunction
 local RollBroadcast = Remotes:WaitForChild("RollBroadcast", 30) :: RemoteEvent
 local ToggleAutoRoll = Remotes:WaitForChild("ToggleAutoRoll", 30) :: RemoteEvent
-local EquipAura = Remotes:WaitForChild("EquipAura", 30) :: RemoteEvent
 local StateSync = Remotes:WaitForChild("StateSync", 30) :: RemoteEvent
 
 -- =============================================================================
@@ -88,16 +100,41 @@ local ROULETTE_DURATION: number = 0.8
 local AUTO_ROULETTE_DURATION: number = 0.16
 local REVEAL_HOLD: number = 2.4
 local BANNER_HOLD: number = 3.6
+-- How often an auto-rolling session is told about the pulls its filter dropped.
+-- The server sends the running total; this only decides how often it is spoken.
+local FILTERED_SUMMARY_INTERVAL: number = 25
 
 -- The top-centre stack, stated once. These three numbers have to agree: the
 -- pity panel's height decides where the pull banner rests, and the banner
 -- decides where the reveal card hangs. They used to be independent literals
 -- (148 / 208 elsewhere), which is how a taller panel ends up under a banner.
+-- The panel grew to 178 when the biome strip was added below the stats line, so
+-- the two rest positions moved with it - all three, together, as the rule says.
 local HUD_TOP_Y: number = 14
-local PITY_PANEL_HEIGHT: number = 146
-local BANNER_REST_Y: number = 170
-local REVEAL_REST_Y: number = 230
+local PITY_PANEL_HEIGHT: number = 196
+local BANNER_REST_Y: number = 220
+local REVEAL_REST_Y: number = 280
+-- Where the biome strip's rows sit, relative to the top panel.
+local BIOME_NAME_Y: number = 134
+local BIOME_RUNGS_Y: number = 150
+local BIOME_RAIL_Y: number = 166
+-- The shrine's own line, the panel's last row, below the biome rail. The panel
+-- grew from 178 to 196 to hold it - the three numbers above moved with it, as the
+-- rule in the comment above says they must.
+local SHRINE_ROW_Y: number = 178
 
+-- Top right: the Top Rollers board. One row per entry the server sends, sized so
+-- the tallest board the server can send always fits the panel.
+local BOARD_PANEL_WIDTH: number = 240
+local BOARD_TITLE_Y: number = 10
+local BOARD_STATUS_Y: number = 26
+local BOARD_ROW_TOP: number = 46
+local BOARD_ROW_HEIGHT: number = 15
+-- Mirrors LeaderboardMath.Constants.maxEntries. The server never sends more, and
+-- the harness checks these two numbers agree so a bigger board cannot silently
+-- lose its last rows.
+local BOARD_ROWS: number = 10
+local BOARD_PANEL_HEIGHT: number = 56 + BOARD_ROWS * BOARD_ROW_HEIGHT
 -- =============================================================================
 -- Tiny UI helpers
 -- =============================================================================
@@ -477,6 +514,170 @@ local statsLabel = makeLabel(topPanel, {
 	TextWrapped = true,
 })
 
+--[[
+	BIOME EVENT STRIP.
+
+	One compact row of server state: which event is running, its countdown, and the
+	rungs it favours - all of it straight out of the payload. The panel does not know
+	the schedule, does not know the event list, and never guesses the next event: if
+	the local countdown runs out it says "switching..." and waits for the server to
+	say what happened, because the server owns the clock and a client that named the
+	next event itself could disagree with the server it is playing on.
+
+	THIS IS THE ONLY PLACE THE BIOME IS RENDERED. The world and atmosphere layer
+	reads the same payload and drives Lighting from it; nothing in this file writes
+	to Lighting, Atmosphere, Workspace or Camera.
+]]
+local biomeNameLabel = makeLabel(topPanel, {
+	Name = "BiomeName",
+	Position = UDim2.fromOffset(16, BIOME_NAME_Y),
+	Size = UDim2.new(1, -104, 0, 15),
+	Text = "BIOME  \226\128\162  connecting...",
+	TextSize = 12,
+	Font = Enum.Font.GothamBlack,
+	TextColor3 = THEME.textDim,
+	TextTruncate = Enum.TextTruncate.AtEnd,
+})
+
+local biomeCountdownLabel = makeLabel(topPanel, {
+	Name = "BiomeCountdown",
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, -16, 0, BIOME_NAME_Y - 1),
+	Size = UDim2.fromOffset(84, 16),
+	Text = "",
+	TextSize = 13,
+	Font = Enum.Font.Code,
+	TextColor3 = THEME.textDim,
+	TextXAlignment = Enum.TextXAlignment.Right,
+})
+
+local biomeRungsLabel = makeLabel(topPanel, {
+	Name = "BiomeRungs",
+	Position = UDim2.fromOffset(16, BIOME_RUNGS_Y),
+	Size = UDim2.new(1, -32, 0, 13),
+	Text = "",
+	TextSize = 10,
+	TextColor3 = THEME.textDim,
+	TextTruncate = Enum.TextTruncate.AtEnd,
+})
+
+local biomeRail = makeFrame(topPanel, {
+	Name = "BiomeRail",
+	Position = UDim2.fromOffset(16, BIOME_RAIL_Y),
+	Size = UDim2.new(1, -32, 0, 6),
+	BackgroundColor3 = Color3.fromRGB(6, 8, 13),
+})
+addCorner(biomeRail, 3)
+addStroke(biomeRail, THEME.stroke, 1, 0.6)
+
+local biomeFill = makeFrame(biomeRail, {
+	Name = "BiomeFill",
+	Size = UDim2.new(0, 0, 1, 0),
+	BackgroundColor3 = THEME.accent,
+})
+addCorner(biomeFill, 3)
+
+--[[
+	THE LUCK SHRINE ROW.
+
+	One line of server state: whether THIS player is in the zone, what being in it
+	is worth, and how many players are in it. The client knows none of that on its
+	own - it is sent, decided server-side from the server's own read of the
+	character - and it says "connecting..." until the first payload arrives rather
+	rather than reporting "outside" as though it had checked.
+
+	The +15% and the effective cooldown are printed from the payload's own numbers
+	(`bonusPercent` and the composed `cooldown`), so retuning ShrineConfig changes
+	the copy with no edit here.
+]]
+local shrineStatusLabel = makeLabel(topPanel, {
+	Name = "ShrineStatus",
+	Position = UDim2.fromOffset(16, SHRINE_ROW_Y),
+	Size = UDim2.new(1, -76, 0, 14),
+	Text = "LUCK SHRINE  \226\128\162  connecting...",
+	TextSize = 11,
+	Font = Enum.Font.GothamBold,
+	TextColor3 = THEME.textDim,
+	TextTruncate = Enum.TextTruncate.AtEnd,
+})
+
+local shrineCrowdLabel = makeLabel(topPanel, {
+	Name = "ShrineCrowd",
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, -16, 0, SHRINE_ROW_Y),
+	Size = UDim2.fromOffset(60, 14),
+	Text = "",
+	TextSize = 11,
+	TextColor3 = THEME.textDim,
+	TextXAlignment = Enum.TextXAlignment.Right,
+})
+
+-- -----------------------------------------------------------------------------
+-- Top right: the Top Rollers board
+-- -----------------------------------------------------------------------------
+
+--[[
+	The board, and the one rule it exists to keep: NO FAKE ZEROS.
+
+	`ready` is the server's own "I have actually read the board" flag. Until it is
+	true the panel prints "connecting..." and no rows at all, because an unread
+	board and an empty one look identical on screen except that one of them is a
+	lie about the whole server. That is the same class of first-frame bug the
+	collection stat had once, and this panel is built so it cannot happen again.
+
+	Row count is fixed (BOARD_ROWS) and the layout is created once: a sync arriving
+	every two seconds must not be building Instances.
+]]
+local boardPanel = makeFrame(hud, {
+	Name = "TopRollers",
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, -14, 0, HUD_TOP_Y),
+	Size = UDim2.fromOffset(BOARD_PANEL_WIDTH, BOARD_PANEL_HEIGHT),
+	BackgroundColor3 = THEME.panel,
+	BackgroundTransparency = 0.06,
+})
+addCorner(boardPanel, 14)
+addStroke(boardPanel, THEME.stroke, 1.3, 0.4)
+addGradient(boardPanel, THEME.panelRaised, THEME.panel, 90)
+
+makeLabel(boardPanel, {
+	Name = "Title",
+	Position = UDim2.fromOffset(14, BOARD_TITLE_Y),
+	Size = UDim2.new(1, -28, 0, 14),
+	Text = "TOP ROLLERS",
+	TextSize = 12,
+	TextColor3 = THEME.textDim,
+	Font = Enum.Font.GothamBlack,
+})
+
+local boardStatusLabel = makeLabel(boardPanel, {
+	Name = "Status",
+	Position = UDim2.fromOffset(14, BOARD_STATUS_Y),
+	Size = UDim2.new(1, -28, 0, 14),
+	-- Filled from the payload: the backend the board is really on. A session-only
+	-- board that does not say so reads exactly like a global one.
+	Text = "connecting...",
+	TextSize = 10,
+	TextColor3 = THEME.textDim,
+	TextTruncate = Enum.TextTruncate.AtEnd,
+})
+
+-- One label per row, created once. `Visible = false` until a row is sent, so the
+-- panel's first frame is a title and a status line - never a list of zeroes.
+local boardRowLabels: { TextLabel } = {}
+for index = 1, BOARD_ROWS do
+	boardRowLabels[index] = makeLabel(boardPanel, {
+		Name = string.format("Row%d", index),
+		Position = UDim2.fromOffset(14, BOARD_ROW_TOP + (index - 1) * BOARD_ROW_HEIGHT),
+		Size = UDim2.new(1, -28, 0, BOARD_ROW_HEIGHT),
+		Text = "",
+		TextSize = 10,
+		TextColor3 = THEME.text,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Visible = false,
+	})
+end
+
 -- -----------------------------------------------------------------------------
 -- Global pull banner
 -- -----------------------------------------------------------------------------
@@ -608,212 +809,14 @@ local toastLabel = makeLabel(hud, {
 })
 
 -- -----------------------------------------------------------------------------
--- Left: collection grid
+-- Left: the inventory drawer (owned elsewhere)
 -- -----------------------------------------------------------------------------
 
-local inventoryPanel = makeFrame(hud, {
-	Name = "CollectionPanel",
-	AnchorPoint = Vector2.new(0, 0.5),
-	Position = UDim2.new(0, 18, 0.5, 8),
-	Size = UDim2.fromOffset(278, 436),
-	BackgroundColor3 = THEME.panel,
-	BackgroundTransparency = 0.06,
-})
-addCorner(inventoryPanel, 14)
-addStroke(inventoryPanel, THEME.stroke, 1.3, 0.4)
-addGradient(inventoryPanel, THEME.panelRaised, THEME.panel, 90)
-
-makeLabel(inventoryPanel, {
-	Name = "Title",
-	Position = UDim2.fromOffset(16, 12),
-	Size = UDim2.new(1, -32, 0, 16),
-	Text = "COLLECTION",
-	TextSize = 14,
-	Font = Enum.Font.GothamBlack,
-})
-
-makeLabel(inventoryPanel, {
-	Name = "Subtitle",
-	Position = UDim2.fromOffset(16, 30),
-	Size = UDim2.new(1, -32, 0, 14),
-	Text = "Click an unlocked aura to equip it",
-	TextSize = 11,
-	TextColor3 = THEME.textDim,
-})
-
-local inventoryScroll = Instance.new("ScrollingFrame") :: ScrollingFrame
-inventoryScroll.Name = "InventoryScroll"
-inventoryScroll.Position = UDim2.fromOffset(10, 50)
-inventoryScroll.Size = UDim2.new(1, -20, 1, -60)
-inventoryScroll.BackgroundTransparency = 1
-inventoryScroll.BorderSizePixel = 0
-inventoryScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-inventoryScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-inventoryScroll.ScrollBarThickness = 4
-inventoryScroll.ScrollBarImageColor3 = THEME.stroke
-inventoryScroll.ScrollingDirection = Enum.ScrollingDirection.Y
-inventoryScroll.Parent = inventoryPanel
-
-local gridLayout = Instance.new("UIGridLayout") :: UIGridLayout
-gridLayout.CellSize = UDim2.fromOffset(120, 64)
-gridLayout.CellPadding = UDim2.fromOffset(8, 8)
-gridLayout.FillDirection = Enum.FillDirection.Horizontal
-gridLayout.FillDirectionMaxCells = 2
-gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
-gridLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
-gridLayout.Parent = inventoryScroll
-
-local gridPadding = Instance.new("UIPadding") :: UIPadding
-gridPadding.PaddingTop = UDim.new(0, 2)
-gridPadding.PaddingLeft = UDim.new(0, 2)
-gridPadding.PaddingBottom = UDim.new(0, 8)
-gridPadding.Parent = inventoryScroll
-
-type InventoryCell = {
-	button: TextButton,
-	stroke: UIStroke,
-	nameLabel: TextLabel,
-	tierLabel: TextLabel,
-	countLabel: TextLabel,
-	badge: TextLabel,
-}
-
-local inventoryCells: { [string]: InventoryCell } = {}
-local ownedCache: { [string]: number } = {}
-local equippedCache: string? = nil
-
-local function refreshInventoryCell(auraId: string): ()
-	local cell = inventoryCells[auraId]
-	if cell == nil then
-		return
-	end
-
-	local config = AuraRegistry.Get(auraId)
-	if config == nil then
-		return
-	end
-
-	local owned = ownedCache[auraId] or 0
-	local isEquipped = equippedCache == auraId
-
-	if owned > 0 then
-		cell.button.BackgroundColor3 = THEME.panelRaised
-		cell.button.TextColor3 = THEME.text
-		cell.stroke.Color = if isEquipped then THEME.success else THEME.stroke
-		cell.stroke.Transparency = if isEquipped then 0.05 else 0.45
-		cell.nameLabel.TextColor3 = AuraRegistry.ToColor3(config.tierColor)
-		cell.countLabel.Text = string.format("OWNED x%d", owned)
-		cell.countLabel.TextColor3 = THEME.textDim
-		cell.badge.Text = if isEquipped then "EQUIPPED" else "1 in " .. formatNumber(config.rarity)
-		cell.badge.TextColor3 = if isEquipped then THEME.success else THEME.textDim
-	else
-		cell.button.BackgroundColor3 = THEME.backdrop
-		cell.button.TextColor3 = THEME.locked
-		cell.stroke.Color = THEME.locked
-		cell.stroke.Transparency = 0.7
-		cell.nameLabel.TextColor3 = THEME.locked
-		cell.countLabel.Text = "NOT FOUND"
-		cell.countLabel.TextColor3 = THEME.locked
-		cell.badge.Text = "1 in " .. formatNumber(config.rarity)
-		cell.badge.TextColor3 = THEME.locked
-	end
-end
-
-local function buildInventoryCell(auraId: string, order: number): ()
-	local config = AuraRegistry.Get(auraId)
-	if config == nil then
-		return
-	end
-
-	local button = makeButton(inventoryScroll, {
-		Name = "Cell_" .. auraId,
-		Text = "",
-		BackgroundColor3 = THEME.panelRaised,
-		LayoutOrder = order,
-	})
-	addCorner(button, 10)
-	local stroke = addStroke(button, THEME.stroke, 1.2, 0.45)
-
-	local colorStrip = makeFrame(button, {
-		Name = "Accent",
-		Position = UDim2.fromOffset(0, 0),
-		Size = UDim2.new(0, 4, 1, 0),
-		BackgroundColor3 = AuraRegistry.ToColor3(config.tierColor),
-	})
-	addCorner(colorStrip, 2)
-
-	local nameLabel = makeLabel(button, {
-		Name = "AuraName",
-		Position = UDim2.fromOffset(12, 8),
-		Size = UDim2.new(1, -18, 0, 15),
-		Text = config.displayName,
-		TextSize = 13,
-		Font = Enum.Font.GothamBold,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-	})
-
-	local tierLabel = makeLabel(button, {
-		Name = "AuraTier",
-		Position = UDim2.fromOffset(12, 24),
-		Size = UDim2.new(1, -18, 0, 12),
-		Text = config.tier,
-		TextSize = 11,
-		TextColor3 = THEME.textDim,
-	})
-
-	local countLabel = makeLabel(button, {
-		Name = "Owned",
-		Position = UDim2.fromOffset(12, 38),
-		Size = UDim2.new(1, -18, 0, 12),
-		Text = "NOT FOUND",
-		TextSize = 11,
-		TextColor3 = THEME.textDim,
-		Font = Enum.Font.GothamBold,
-	})
-
-	local badge = makeLabel(button, {
-		Name = "Badge",
-		Position = UDim2.fromOffset(12, 50),
-		Size = UDim2.new(1, -18, 0, 12),
-		Text = "",
-		TextSize = 10,
-		TextColor3 = THEME.textDim,
-		Font = Enum.Font.Code,
-	})
-
-	inventoryCells[auraId] = {
-		button = button,
-		stroke = stroke,
-		nameLabel = nameLabel,
-		tierLabel = tierLabel,
-		countLabel = countLabel,
-		badge = badge,
-	}
-
-	button.MouseEnter:Connect(function()
-		if (ownedCache[auraId] or 0) > 0 then
-			TweenService:Create(button, TweenInfo.new(0.12), { BackgroundColor3 = THEME.raisedHover }):Play()
-		end
-	end)
-	button.MouseLeave:Connect(function()
-		refreshInventoryCell(auraId)
-	end)
-	button.Activated:Connect(function()
-		if (ownedCache[auraId] or 0) <= 0 then
-			return
-		end
-		if equippedCache == auraId then
-			return
-		end
-		EquipAura:FireServer(auraId)
-	end)
-
-	refreshInventoryCell(auraId)
-end
-
-for index, auraId in ipairs(AuraRegistry.ORDER) do
-	buildInventoryCell(auraId, index)
-end
+-- The collection grid, its cells, its equip/delete buttons and the auto-filter
+-- control are `InventoryUI`. MainUI only mounts it (see the bottom of this file)
+-- and hands it every server payload, the same way it mounts `ShopUI`. The grid
+-- used to live here; moving it out is what kept this file from becoming the
+-- home of every panel in the game.
 
 -- =============================================================================
 -- View state
@@ -858,6 +861,278 @@ local function showToast(message: string, color: Color3?): ()
 		end
 		TweenService:Create(toastLabel, TweenInfo.new(0.35), { TextTransparency = 1 }):Play()
 	end)
+end
+
+--[[
+	Biome strip rendering.
+
+	Two halves, deliberately split:
+
+	  * `updateBiomeView` is the only thing that can change WHICH event is shown. It runs
+	    when the server pushes state and at no other time, so a client cannot invent a
+	    switch. An event it does not recognise (or a missing field) blanks the strip
+	    rather than showing the previous event as though it were current.
+	  * `paintBiomeCountdown` only re-draws the number, once per displayed second,
+	    between pushes. When the local countdown reaches zero it stops naming anything
+	    and says "switching..." until the server's next push arrives - one second later
+	    at the sync cadence - so the worst case is a brief, honest "switching".
+]]
+local biomeServerSeconds: number = 0
+local biomeSyncedAt: number = 0
+local biomeHasState: boolean = false
+local biomeDisplayedSecond: number = -1
+local biomeColor: Color3 = THEME.textDim
+local biomeProgress: number = 0
+-- Which rungs the CURRENT event favours, by id, plus the words to name it on a
+-- reveal. Both come from the payload's boosted list - the client never decides
+-- for itself that an aura "should" be boosted.
+local biomeBoostedIds: { [string]: boolean } = {}
+local biomeBadgeText: string = ""
+
+local function paintBiomeCountdown(): ()
+	if not biomeHasState then
+		return
+	end
+
+	-- Clamp the client's belief to what the server last said: interpolation may only
+	-- count down towards the next event, never past it (a client-side clock jump
+	-- backwards would otherwise make the countdown grow).
+	local elapsed = math.max(0, os.clock() - biomeSyncedAt)
+	local remaining = math.max(0, biomeServerSeconds - elapsed)
+	local whole = math.floor(remaining + 0.5)
+
+	if whole == biomeDisplayedSecond then
+		return
+	end
+	biomeDisplayedSecond = whole
+
+	if whole <= 0 then
+		biomeCountdownLabel.Text = "switching..."
+		biomeCountdownLabel.TextColor3 = THEME.textDim
+		biomeFill.Size = UDim2.new(1, 0, 1, 0)
+		return
+	end
+
+	biomeCountdownLabel.Text = string.format("%d:%02d", math.floor(whole / 60), whole % 60)
+	biomeCountdownLabel.TextColor3 = biomeColor
+	biomeFill.Size = UDim2.new(math.clamp(biomeProgress, 0, 1), 0, 1, 0)
+end
+
+local function formatBoostedRungs(boosted: any): string
+	local names: { string } = {}
+	if type(boosted) == "table" then
+		for _, rung in ipairs(boosted) do
+			if type(rung) == "table" and type(rung.displayName) == "string" and rung.displayName ~= "" then
+				table.insert(names, rung.displayName)
+			end
+		end
+	end
+	if #names == 0 then
+		return ""
+	end
+	return table.concat(names, ", ")
+end
+
+local function updateBiomeView(payload: any): ()
+	local biome = payload.biome
+	if type(biome) ~= "table" or type(biome.displayName) ~= "string" or biome.displayName == "" then
+		-- No state yet (or an unknown event). Say so instead of leaving the last event
+		-- standing, and drop the boosted set so a later reveal cannot be badged with it.
+		biomeHasState = false
+		biomeBoostedIds = {}
+		biomeBadgeText = ""
+		biomeNameLabel.Text = "BIOME  \226\128\162  connecting..."
+		biomeNameLabel.TextColor3 = THEME.textDim
+		biomeRungsLabel.Text = ""
+		biomeCountdownLabel.Text = ""
+		biomeFill.Size = UDim2.new(0, 0, 1, 0)
+		return
+	end
+
+	local accent = biome.accent
+	if type(accent) == "table" then
+		biomeColor = Color3.fromRGB(
+			math.clamp(tonumber(accent.r) or 96, 0, 255),
+			math.clamp(tonumber(accent.g) or 168, 0, 255),
+			math.clamp(tonumber(accent.b) or 255, 0, 255)
+		)
+	else
+		biomeColor = THEME.accent
+	end
+
+	biomeHasState = true
+	biomeServerSeconds = math.max(0, tonumber(biome.secondsRemaining) or 0)
+	biomeSyncedAt = os.clock()
+	biomeProgress = math.clamp(tonumber(biome.progress) or 0, 0, 1)
+	biomeDisplayedSecond = -1 -- force a repaint even if the second has not changed
+
+	-- The multiplier is the server's number, printed as it arrives: if the design
+	-- changes to 2x or 5x, this line follows the payload without an edit here.
+	local multiplierText = formatNumber(tonumber(biome.multiplier) or 1)
+	biomeNameLabel.Text = string.format(
+		"%s  \226\128\162  x%s ON THEMED RUNGS",
+		biome.displayName,
+		multiplierText
+	)
+	biomeNameLabel.TextColor3 = biomeColor
+	biomeFill.BackgroundColor3 = biomeColor
+
+	biomeBoostedIds = {}
+	local boosted = biome.boosted
+	if type(boosted) == "table" then
+		for _, rung in ipairs(boosted) do
+			if type(rung) == "table" and type(rung.id) == "string" then
+				biomeBoostedIds[rung.id] = true
+			end
+		end
+	end
+	biomeBadgeText = string.format("%s x%s", string.upper(biome.displayName), multiplierText)
+
+	local rungs = formatBoostedRungs(boosted)
+	biomeRungsLabel.Text = if rungs == "" then "" else "Boosted: " .. rungs
+
+	paintBiomeCountdown()
+end
+
+--[[
+	The shrine row's rendering.
+
+	Everything on it is the server's: `inside` came from a read of this player's
+	own character on the server, and `bonusPercent` is ShrineConfig's number as the
+	server resolved it. Before the first payload the
+	row says "connecting..." rather than "outside" - the client has not checked
+	anything and must not imply that it has.
+]]
+local function updateShrineView(payload: any): ()
+	local shrine = payload.shrine
+	if type(shrine) ~= "table" or type(shrine.displayName) ~= "string" then
+		shrineStatusLabel.Text = "LUCK SHRINE  \226\128\162  connecting..."
+		shrineStatusLabel.TextColor3 = THEME.textDim
+		shrineCrowdLabel.Text = ""
+		return
+	end
+
+	local accent = shrine.accent
+	local colour = THEME.textDim
+	if type(accent) == "table" then
+		colour = Color3.fromRGB(
+			math.clamp(tonumber(accent.r) or 255, 0, 255),
+			math.clamp(tonumber(accent.g) or 214, 0, 255),
+			math.clamp(tonumber(accent.b) or 140, 0, 255)
+		)
+	end
+
+	local bonus = math.floor(tonumber(shrine.bonusPercent) or 0)
+	local inside = shrine.inside == true
+
+	if inside then
+		-- The cooldown on screen is the payload's `cooldown` - the composed number
+		-- the roll path will actually use - so the +15% cannot be advertised without
+		-- the seconds it really buys.
+		local cooldown = tonumber(payload.cooldown)
+		local secondsInside = math.max(0, math.floor(tonumber(shrine.secondsInside) or 0))
+		local cooldownText = if cooldown ~= nil then string.format("  \226\128\162  %.2fs", cooldown) else ""
+		shrineStatusLabel.Text = string.format(
+			"%s  \226\128\162  INSIDE  \226\128\162  +%d%% ROLL SPEED  %ds%s",
+			string.upper(shrine.displayName),
+			bonus,
+			secondsInside,
+			cooldownText
+		)
+		shrineStatusLabel.TextColor3 = colour
+	else
+		shrineStatusLabel.Text = string.format(
+			"%s  \226\128\162  +%d%% ROLL SPEED WHILE INSIDE",
+			string.upper(shrine.displayName),
+			bonus
+		)
+		shrineStatusLabel.TextColor3 = THEME.textDim
+	end
+
+	local crowd = math.max(0, math.floor(tonumber(shrine.playersInside) or 0))
+	-- "1 IN ZONE" reads as this player; the count is the server's.
+	shrineCrowdLabel.Text = if crowd <= 0 then "" else string.format("%d IN ZONE", crowd)
+	shrineCrowdLabel.TextColor3 = colour
+end
+
+--[[
+	The board's rendering, with the no-fake-zeros rule stated in one place.
+
+	`ready` false means the server has not read a board yet - so the panel says
+	"connecting..." and hides every row. An empty board after a real read is
+	different state and says so with words, not with ten rows of "0 rolls".
+]]
+local function formatBoardRow(row: any, isSelf: boolean): string
+	local rank = math.max(0, math.floor(tonumber(row.rank) or 0))
+	local name = if type(row.name) == "string" and row.name ~= "" then row.name else "?"
+	local rolls = math.max(0, math.floor(tonumber(row.rolls) or 0))
+	local rarest = math.max(0, math.floor(tonumber(row.rarestRarity) or 0))
+
+	-- "nothing rare yet" rather than "1 in 0", and the aura's own label when the
+	-- server resolved one.
+	local findText = "no rare find yet"
+	if rarest > 0 then
+		local auraName = if type(row.rarestDisplayName) == "string" and row.rarestDisplayName ~= ""
+			then row.rarestDisplayName
+			else "?"
+		findText = string.format("%s 1 in %s", auraName, formatNumber(rarest))
+	end
+
+	local prefix = if isSelf then ">" else " "
+	return string.format("%s%d. %s  \226\128\162  %s  \226\128\162  %s", prefix, rank, name, formatNumber(rolls), findText)
+end
+
+local function updateLeaderboardView(payload: any): ()
+	local board = payload.leaderboard
+
+	-- The unread case, first and unconditionally: nothing below this line runs on
+	-- a board that has not been read.
+	if type(board) ~= "table" or board.ready ~= true then
+		boardStatusLabel.Text = "connecting..."
+		boardStatusLabel.TextColor3 = THEME.textDim
+		for _, label in ipairs(boardRowLabels) do
+			label.Text = ""
+			label.Visible = false
+		end
+		return
+	end
+
+	local entries = board.entries
+	local shown = 0
+	if type(entries) == "table" then
+		for index, row in ipairs(entries) do
+			local label = boardRowLabels[index]
+			if label == nil or type(row) ~= "table" then
+				break
+			end
+			local isSelf = tonumber(row.userId) == localUserId
+			label.Text = formatBoardRow(row, isSelf)
+			label.Visible = true
+			-- A border, not colour alone: the highlight has to survive being read by
+			-- someone who cannot tell the accent colour from the text colour.
+			label.Font = if isSelf then Enum.Font.GothamBold else Enum.Font.Gotham
+			shown += 1
+		end
+	end
+
+	for index = shown + 1, #boardRowLabels do
+		boardRowLabels[index].Text = ""
+		boardRowLabels[index].Visible = false
+	end
+
+	-- The status line says which board this is: a session-only fallback must not
+	-- read like a global ladder, and an empty one must not read like a bug.
+	local backend = if type(board.backend) == "string" then board.backend else "unknown"
+	if shown == 0 then
+		boardStatusLabel.Text = if board.sessionOnly == true
+			then "no rolls yet  \226\128\162  session only (no Data Store)"
+			else "no rolls yet on this board"
+	elseif board.sessionOnly == true then
+		boardStatusLabel.Text = string.format("%d rollers  \226\128\162  session only", shown)
+	else
+		boardStatusLabel.Text = string.format("%d rollers  \226\128\162  %s", shown, backend)
+	end
+	boardStatusLabel.TextColor3 = THEME.textDim
 end
 
 -- Renders the pity countdowns and the session streak from one server payload.
@@ -964,9 +1239,10 @@ local function updateProgressionView(payload: any): ()
 		end
 	end
 
-	-- Count straight from the payload. Reading `ownedCache` here made this stat lag
-	-- exactly one StateSync behind (it is rebuilt by updateInventoryView), which is
-	-- why a player who clearly owned an aura still read an empty collection.
+	-- Count straight from the payload rather than from the drawer's mirror of it.
+	-- Reading a cache here used to make this stat lag exactly one StateSync behind,
+	-- which is why a player who clearly owned an aura still read an empty
+	-- collection. The drawer keeps that cache now, so this reads the source.
 	local ownedCount = 0
 	if type(payload.inventory) == "table" then
 		for auraId, count in pairs(payload.inventory :: { [any]: any }) do
@@ -986,21 +1262,14 @@ local function updateProgressionView(payload: any): ()
 	)
 end
 
+--[[
+	The drawer's grid, cells and caches are InventoryUI's now (it mounts below with
+	the rest of the panels). MainUI hands every payload straight through, so there
+	is exactly one copy of "what does this player own" on the client - and it is
+the drawer's.
+]]
 local function updateInventoryView(payload: any): ()
-	ownedCache = {}
-	if type(payload.inventory) == "table" then
-		for auraId, count in pairs(payload.inventory :: { [any]: any }) do
-			if type(auraId) == "string" and type(count) == "number" and AuraRegistry.Get(auraId) ~= nil then
-				ownedCache[auraId] = math.floor(count)
-			end
-		end
-	end
-
-	equippedCache = if type(payload.equippedAura) == "string" then payload.equippedAura else nil
-
-	for auraId in pairs(inventoryCells) do
-		refreshInventoryCell(auraId)
-	end
+	InventoryUI.ApplyState(payload)
 end
 
 -- =============================================================================
@@ -1128,6 +1397,12 @@ local function playRollReveal(payload: any, quick: boolean): ()
 				tonumber(payload.ownedCount) or 1
 			)
 			revealMeta.TextColor3 = THEME.textDim
+		end
+
+		-- A boosted pull says why it was worth more. The check is membership in the
+		-- server's boosted set, so no tier is special-cased here.
+		if biomeBadgeText ~= "" and biomeBoostedIds[config.id] == true then
+			revealMeta.Text = revealMeta.Text .. "   \226\128\162   " .. biomeBadgeText
 		end
 
 		popReveal()
@@ -1260,13 +1535,50 @@ RollBroadcast.OnClientEvent:Connect(function(payload: any)
 
 	if isMine and sequence > lastPersonalSequence then
 		lastPersonalSequence = sequence
-		playRollReveal(payload, payload.source == "Auto")
 
-		if payload.autoEquipped then
-			showToast(
-				string.format("Auto equipped %s", tostring(payload.displayName or payload.auraId)),
-				THEME.success
-			)
+		--[[
+			A FILTERED PULL IS NOT A REWARD, so it does not get the reveal, the
+			cutscene or the VFX: the player never owned it. It must still not vanish
+			silently, so it is announced - with the rung it fell below - and the
+			guaranteed-pity case is called out loudly, because dropping a guaranteed
+			Rare+ is exactly the thing a player would not expect and must be told.
+
+			The threshold's NAME comes from the ladder, not from a table here.
+		]]
+		if payload.filtered == true then
+			local threshold = tonumber(payload.filterRarity) or 0
+			local action = if payload.filterAction == "delete" then "DELETED" else "AUTO-SKIPPED"
+			local total = tonumber(payload.filteredTotal) or 0
+			-- Manual: say it every time. Auto: only every Nth, because an auto-rolling
+			-- player would otherwise toast once a second. The drawer's live tally is
+			-- the channel in between, so nothing is hidden either way.
+			local worthSaying = payload.source ~= "Auto"
+				or payload.hardPityTriggered == true
+				or (total > 0 and total % FILTERED_SUMMARY_INTERVAL == 0)
+
+			if worthSaying then
+				showToast(
+					string.format(
+						"%s %s (1 in %s) - below your %s%s filter%s",
+						action,
+						tostring(payload.displayName or payload.auraId),
+						formatNumber(tonumber(payload.rarity) or 0),
+						AuraRegistry.TierOf(threshold),
+						if payload.hardPityTriggered then " - that was the GUARANTEED pull" else "",
+						if payload.source == "Auto" then string.format("   \226\128\162   %d filtered", total) else ""
+					),
+					if payload.hardPityTriggered then THEME.danger else THEME.warm
+				)
+			end
+		else
+			playRollReveal(payload, payload.source == "Auto")
+
+			if payload.autoEquipped then
+				showToast(
+					string.format("Auto equipped %s", tostring(payload.displayName or payload.auraId)),
+					THEME.success
+				)
+			end
 		end
 	end
 
@@ -1276,10 +1588,22 @@ RollBroadcast.OnClientEvent:Connect(function(payload: any)
 	end
 end)
 
+--[[
+	The last payload the server sent, kept for one reason: the join-time StateSync
+	can land BEFORE the drawer is mounted (the connection below is set up before the
+	panels at the bottom of this file are). Without a replay the drawer would open
+	showing "NOT FOUND" everywhere and "filter off" for up to a second or two, which
+	reads as data rather than as "not loaded yet" - the same class of lie the
+	collection stat had once.
+]]
+local lastStatePayload: any = nil
+
 StateSync.OnClientEvent:Connect(function(payload: any)
 	if type(payload) ~= "table" then
 		return
 	end
+
+	lastStatePayload = payload
 
 	currentCooldown = tonumber(payload.cooldown) or 1.2
 
@@ -1298,6 +1622,9 @@ StateSync.OnClientEvent:Connect(function(payload: any)
 	-- Inventory first so the grid and the collection stat are always consistent.
 	updateInventoryView(payload)
 	updateProgressionView(payload)
+	updateBiomeView(payload)
+	updateShrineView(payload)
+	updateLeaderboardView(payload)
 end)
 
 -- =============================================================================
@@ -1409,6 +1736,11 @@ task.spawn(function()
 			rollStroke.Transparency = if fill > 0.02 then 0.75 else 0.35
 		end
 
+		-- The biome countdown ticks inside this existing loop rather than a task of
+		-- its own: painting only happens when the displayed second changes, so the
+		-- added cost is a comparison per frame.
+		paintBiomeCountdown()
+
 		task.wait(0.05)
 	end
 end)
@@ -1425,7 +1757,18 @@ updateProgressionView({
 	inventory = {},
 	rarestAura = nil,
 })
-updateInventoryView({ inventory = {}, equippedAura = nil })
+-- Same rule for the biome strip: no event is invented for the gap before the
+-- first push. It reads "connecting..." until the server names the event and the
+-- countdown it is actually running.
+updateBiomeView({})
+-- And the same rule twice more: the shrine row does not claim "outside" before
+-- the server has read this player's character, and the board shows no rows and
+-- no zeroes until the server says it has read one.
+updateShrineView({})
+updateLeaderboardView({})
+
+-- The drawer paints its own empty state when it mounts (below), so there is no
+-- local "what does this player own" guess here: it is all server truth or blank.
 setToggleVisual(autoButton, autoStroke, false, THEME.success, Color3.fromRGB(28, 62, 46))
 setToggleVisual(fastButton, fastStroke, false, THEME.warm, THEME.warmDeep)
 setToggleVisual(lowVfxButton, lowVfxStroke, false, THEME.accent, Color3.fromRGB(28, 48, 88))
@@ -1448,6 +1791,26 @@ ShopUI.Mount({
 	showToast = showToast,
 })
 
+-- The drawer is mounted the same way, and owns its own toggle: MainUI hands over
+-- the HUD, the theme and the same helpers, and nothing else. `formatNumber` goes
+-- along so "1 in 500000" is formatted by one function for the whole interface.
+InventoryUI.Mount({
+	parent = hud,
+	theme = THEME,
+	makeFrame = makeFrame,
+	makeLabel = makeLabel,
+	makeButton = makeButton,
+	addCorner = addCorner,
+	addStroke = addStroke,
+	addGradient = addGradient,
+	wireHover = wireHover,
+	formatNumber = formatNumber,
+})
+
+-- Replay the join-time sync if it already arrived (nil-safe: ApplyState ignores
+-- anything that is not a table), so the drawer's first frame is the truth.
+InventoryUI.ApplyState(lastStatePayload)
+
 -- Keyboard shortcuts: R rolls, L toggles low VFX, H hides the interface, B opens
 -- the shop.
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
@@ -1464,12 +1827,15 @@ UserInputService.InputBegan:Connect(function(input: InputObject, processed: bool
 		setUIHidden(not uiHidden)
 	elseif input.KeyCode == Enum.KeyCode.B then
 		ShopUI.Toggle()
+	elseif input.KeyCode == Enum.KeyCode.I then
+		InventoryUI.ToggleDrawer()
 	end
 end)
 
 print(
 	string.format(
-		"[MainUI] Ready. %d auras registered. Hard pity at %d rolls. Shop: press SHOP or B.",
+		"[MainUI] Ready. %d auras registered. Hard pity at %d rolls. Shop: press SHOP or B. "
+			.. "Inventory + auto-filter: press the AURAS drawer handle or I.",
 		AuraRegistry.Count,
 		RollMath.HardPityRolls()
 	)

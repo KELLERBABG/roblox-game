@@ -281,8 +281,15 @@ script.Parent = Instance.new("Folder")
 script.Parent.Parent = Instance.new("Folder")
 
 local mockDecals = {
-	Textures = { SakuraPetal = "rbxassetid://1" },
+	Textures = {
+		SakuraPetal = "rbxassetid://1",
+		HolySigil = "rbxassetid://4995938421",
+		RunicCircle = "rbxassetid://6027419163",
+		AbyssalVortex = "rbxassetid://5857851887",
+		CelestialStar = "rbxassetid://5854262447",
+	},
 	ColorSequenceGradient = function(...) return {} end,
+	ColorSequenceUniform = function(...) return {} end,
 }
 
 function require(mod)

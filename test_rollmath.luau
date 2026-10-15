@@ -29,6 +29,7 @@ local fs = require("@lune/fs")
 
 local RollMath = require("./src/shared/RollMath")
 local AuraRegistry = require("./src/shared/AuraRegistry")
+local BiomeMath = require("./src/server/BiomeMath")
 
 local failures = 0
 local checks = 0
@@ -791,6 +792,580 @@ check(
 check("shardShape, trailWidth and cutscene values map exactly as declared", #mappingProblems == 0, table.concat(mappingProblems, ", "))
 check("materializing twice returns the same cached instance", #cacheMismatches == 0, table.concat(cacheMismatches, ", "))
 check("materializing an unknown id returns nil", AuraRegistry.Materialize("NotAnAura") == nil)
+
+-- =============================================================================
+section("Biome events: the schedule runs off an injected clock")
+
+local BIOME_IDS = BiomeMath.Ids()
+local CYCLE = BiomeMath.CycleSeconds()
+local BIOME_BOOSTS = BiomeMath.Boosts(AuraRegistry)
+
+check(
+	"three events, one duration, no fourth state",
+	BiomeMath.Count() == 3 and CYCLE == 300 and #BIOME_IDS == 3,
+	string.format("count=%d cycle=%s", BiomeMath.Count(), tostring(CYCLE))
+)
+check("one multiplier for the whole system (x3), not one per event", BiomeMath.Multiplier() == 3, tostring(BiomeMath.Multiplier()))
+
+local opening = BiomeMath.At(0)
+check(
+	"the cycle opens on the first event, at full time and at zero progress",
+	opening.id == BIOME_IDS[1] and opening.secondsRemaining == CYCLE and opening.progress == 0,
+	string.format("%s rem=%s progress=%s", opening.id, tostring(opening.secondsRemaining), tostring(opening.progress))
+)
+
+--[[
+	The boundary itself, from both sides. "Advances on schedule" has to mean
+	exactly: at 299.999s the previous event is still running with 0.001s left, at
+	300.000s the next one has started at full time. An off-by-one (>= instead of >)
+	or a ceil where a floor belongs shows up here and nowhere else.
+]]
+local boundaryProblems: { string } = {}
+for step = 1, 6 do
+	local start = step * CYCLE
+	local expected = BIOME_IDS[(step % #BIOME_IDS) + 1]
+	local before = BiomeMath.At(start - 0.001)
+	local at = BiomeMath.At(start)
+	local after = BiomeMath.At(start + 0.001)
+
+	if at.id ~= expected or at.secondsRemaining ~= CYCLE or at.progress ~= 0 then
+		table.insert(boundaryProblems, string.format("at %ds expected %s, got %s", start, expected, at.id))
+	end
+	if before.id == expected or before.secondsRemaining <= 0 or before.secondsRemaining > 0.002 then
+		table.insert(
+			boundaryProblems,
+			string.format("just before %ds: %s with %s left", start, before.id, tostring(before.secondsRemaining))
+		)
+	end
+	if after.id ~= expected or after.secondsRemaining >= CYCLE then
+		table.insert(boundaryProblems, string.format("just after %ds: %s", start, after.id))
+	end
+end
+check("an event changes exactly on its boundary and nowhere else", #boundaryProblems == 0, table.concat(boundaryProblems, "; "))
+
+--[[
+	A second-by-second walk over three full cycles. Checking only the boundaries
+	would pass an implementation that is right at multiples of the cycle and wrong
+	in between, so every second of three cycles is compared against the schedule
+	written out here independently.
+]]
+local walkProblems: { string } = {}
+for elapsed = 0, CYCLE * 3 - 1 do
+	local state = BiomeMath.At(elapsed)
+	local expectedId = BIOME_IDS[math.floor(elapsed / CYCLE) % #BIOME_IDS + 1]
+	local expectedRemaining = CYCLE - (elapsed % CYCLE)
+
+	if state.id ~= expectedId then
+		table.insert(walkProblems, string.format("t=%ds: %s not %s", elapsed, state.id, expectedId))
+	elseif math.abs(state.secondsRemaining - expectedRemaining) > 1e-9 then
+		table.insert(walkProblems, string.format("t=%ds: %s left, not %d", elapsed, tostring(state.secondsRemaining), expectedRemaining))
+	elseif math.abs(state.progress - (elapsed % CYCLE) / CYCLE) > 1e-9 then
+		table.insert(walkProblems, string.format("t=%ds: progress %s", elapsed, tostring(state.progress)))
+	end
+end
+check(
+	string.format("every second of three full cycles (%d samples) lands on schedule", CYCLE * 3),
+	#walkProblems == 0,
+	table.concat(walkProblems, "; ") .. (if #walkProblems > 2 then " ..." else "")
+)
+
+--[[
+	A player who joins mid-event. Nothing in BiomeMath reads a clock of its own or
+	remembers a player, so the same elapsed time must produce the same event for
+	two callers - the joiner and the player who has been there since the start.
+]]
+local joinProblems: { string } = {}
+for _, elapsed in ipairs({ 7, 149, 299, 301, 425, 899 }) do
+	local first = BiomeMath.At(elapsed)
+	local second = BiomeMath.At(elapsed)
+	if
+		first.id ~= second.id
+		or first.secondsRemaining ~= second.secondsRemaining
+		or first.progress ~= second.progress
+		or first.index ~= second.index
+		or first.multiplier ~= second.multiplier
+	then
+		table.insert(joinProblems, string.format("t=%ds disagrees between callers", elapsed))
+	end
+end
+check("two callers asking about the same instant are told the same event", #joinProblems == 0, table.concat(joinProblems, "; "))
+
+local midEvent = BiomeMath.At(425)
+check(
+	"a player joining mid-event joins the event already running (t=425s is 125s into Blood Moon)",
+	midEvent.id == "BloodMoon" and midEvent.secondsRemaining == 175 and math.abs(midEvent.progress - 125 / CYCLE) < 1e-9,
+	string.format("%s rem=%s", midEvent.id, tostring(midEvent.secondsRemaining))
+)
+
+--[[
+	A damaged clock must not put a NaN countdown on screen. Two outcomes are
+	admissible and this pins both: a real event state with the real multiplier, or
+	the "no event" shape (empty id, 1x) for a time that is not a number at all. What
+	is NOT admissible is a NaN or out-of-range countdown, or a state that claims an
+	event while carrying no multiplier.
+]]
+local clockProblems: { string } = {}
+for _, elapsed in ipairs({ -1, -1e9, 0 / 0, math.huge, -math.huge, 1e15, 2 ^ 53 }) do
+	local state = BiomeMath.At(elapsed)
+	local finite = state.secondsRemaining == state.secondsRemaining
+		and state.secondsRemaining >= 0
+		and state.secondsRemaining <= CYCLE
+		and state.progress == state.progress
+		and state.progress >= 0
+		and state.progress < 1
+	local named = state.id ~= ""
+		and state.multiplier == BiomeMath.Multiplier()
+		and state.secondsRemaining > 0
+	local anonymous = state.id == ""
+		and state.multiplier == 1
+		and state.displayName == ""
+		and state.secondsRemaining == CYCLE
+	if not (finite and (named or anonymous)) then
+		table.insert(
+			clockProblems,
+			string.format("%s -> id=%q rem=%s progress=%s x%s", tostring(elapsed), state.id, tostring(state.secondsRemaining), tostring(state.progress), tostring(state.multiplier))
+		)
+	end
+end
+check("a broken or extreme clock yields either a real event or an honest no-event, never a NaN countdown", #clockProblems == 0, table.concat(clockProblems, "; "))
+
+--[[
+	The data, read against the real ladder. `Boosts` resolves BiomeConfig's ids
+	through AuraRegistry and raises on any problem, so this running at all proves
+the shipped config names only real auras. What is asserted here is the shape the
+	roll path and the payload depend on.
+]]
+local rungProblems: { string } = {}
+local themedTotal: { [string]: number } = {}
+for _, biomeId in ipairs(BIOME_IDS) do
+	local boost = BIOME_BOOSTS[biomeId]
+	if boost == nil then
+		table.insert(rungProblems, biomeId .. " has no resolved boost")
+		continue
+	end
+	if boost.id ~= biomeId or boost.multiplier ~= 3 then
+		table.insert(rungProblems, string.format("%s: id=%s multiplier=%s", biomeId, boost.id, tostring(boost.multiplier)))
+	end
+	-- The resolved rungs must be the config's own list, not a subset or a superset:
+	-- a rung dropped in resolution would silently stop being boosted.
+	local declared: number? = nil
+	for _, definition in ipairs(BiomeMath.Biomes) do
+		if definition.id == biomeId then
+			declared = #definition.auraIds
+		end
+	end
+	if declared == nil or declared ~= #boost.rungs then
+		table.insert(
+			rungProblems,
+			string.format("%s declares %s rungs but resolved %d", biomeId, tostring(declared), #boost.rungs)
+		)
+	end
+
+	for _, rung in ipairs(boost.rungs) do
+		local config = AuraRegistry.Get(rung.auraId)
+		if config == nil then
+			table.insert(rungProblems, string.format("%s rung %s is not on the ladder", biomeId, rung.auraId))
+		elseif config.rarity ~= rung.rarity or config.displayName ~= rung.displayName or config.tier ~= rung.tier then
+			table.insert(rungProblems, string.format("%s rung %s disagrees with the ladder", biomeId, rung.auraId))
+		end
+		themedTotal[rung.auraId] = (themedTotal[rung.auraId] or 0) + 1
+	end
+	for index = 2, #boost.rungs do
+		if boost.rungs[index - 1].rarity >= boost.rungs[index].rarity then
+			table.insert(rungProblems, string.format("%s rungs are not ascending by rarity", biomeId))
+		end
+	end
+end
+check("every event's rungs resolve to real ladder entries, ascending, with the ladder's own labels", #rungProblems == 0, table.concat(rungProblems, "; "))
+
+--[[
+	Coverage, which is a design statement rather than a bug: the three themes
+	partition the ladder. It is asserted so that a later retune has to remove a rung
+	from one event before adding it to another, instead of quietly leaving a rung
+	that no event can ever favour.
+]]
+local uncovered: { string } = {}
+local duplicated: { string } = {}
+for _, auraId in ipairs(AuraRegistry.ORDER) do
+	local count = themedTotal[auraId] or 0
+	if count == 0 then
+		table.insert(uncovered, auraId)
+	elseif count > 1 then
+		table.insert(duplicated, auraId)
+	end
+end
+check(
+	"every rung on the ladder belongs to exactly one event (12 of 12 themed, none twice)",
+	#uncovered == 0 and #duplicated == 0,
+	string.format("unthemed: [%s]  themed twice: [%s]", table.concat(uncovered, ", "), table.concat(duplicated, ", "))
+)
+
+check("the shipped biome config audits clean", #BiomeMath.Audit(AuraRegistry) == 0, table.concat(BiomeMath.Audit(AuraRegistry), "; "))
+
+-- Negative control for the audit: a ladder missing a themed aura must be caught.
+local crippledLadder = {
+	ORDER = AuraRegistry.ORDER,
+	Get = function(id: string): any?
+		if id == "Ember" then
+			return nil
+		end
+		return AuraRegistry.Get(id)
+	end,
+}
+local crippledProblems = BiomeMath.Audit(crippledLadder :: any)
+local mentionsEmber = false
+for _, problem in ipairs(crippledProblems) do
+	if string.find(problem, "Ember", 1, true) ~= nil then
+		mentionsEmber = true
+	end
+end
+check(
+	"the audit catches a themed aura the ladder does not have (control)",
+	#crippledProblems > 0 and mentionsEmber,
+	table.concat(crippledProblems, "; ")
+)
+
+-- =============================================================================
+section("Biome events: the boost is one more weight factor in the one selection path")
+
+local function chanceById(odds: { any }, auraId: string): number?
+	for _, entry in ipairs(odds) do
+		if entry.auraId == auraId then
+			return entry.chance
+		end
+	end
+	return nil
+end
+
+local function shareOf(odds: { any }, ids: { [string]: boolean }): number
+	local total = 0
+	for _, entry in ipairs(odds) do
+		if ids[entry.auraId] == true then
+			total += entry.chance
+		end
+	end
+	return total
+end
+
+--[[
+	THE claim, exactly: under an event, a themed rung's probability relative to an
+	unthemed rung's is 3x what it is without the event. Both sides are measured from
+	RollMath's own table, so this fails if the multiply is dropped, applied to the
+	whole pool, or applied to a rung the event does not theme.
+
+	Run at several luck/pity points, because the factor has to COMPOSE with the
+	two factors already in the weight vector rather than replace them.
+]]
+local ratioProblems: { string } = {}
+local untouchedProblems: { string } = {}
+local sumProblems: { string } = {}
+for _, scenario in ipairs({
+	{ label = "luck 1", luck = 1, pity = 0 },
+	{ label = "luck 25", luck = 25, pity = 0 },
+	{ label = "soft pity (1 stack)", luck = 1, pity = 60 },
+	{ label = "soft pity cap", luck = 1, pity = 300 },
+}) do
+	local without = RollMath.ChanceTable(scenario.luck, scenario.pity, nil)
+	for _, biomeId in ipairs(BIOME_IDS) do
+		local boost = BIOME_BOOSTS[biomeId]
+		local with = RollMath.ChanceTable(scenario.luck, scenario.pity, boost)
+
+		local total = 0
+		for _, entry in ipairs(with) do
+			total += entry.chance
+		end
+		if math.abs(total - 1) > 1e-9 then
+			table.insert(sumProblems, string.format("%s / %s: total=%s", biomeId, scenario.label, tostring(total)))
+		end
+
+		-- Unthemed rungs: every one of them must have moved by the SAME factor,
+		-- which is exactly what "only the themed weights changed" means numerically.
+		local unthemedFactor: number? = nil
+		local themed: { string } = {}
+		local unthemed: { string } = {}
+		for _, entry in ipairs(with) do
+			local base = chanceById(without, entry.auraId)
+			if base == nil or base <= 0 then
+				table.insert(ratioProblems, string.format("%s / %s: %s missing without the event", biomeId, scenario.label, entry.auraId))
+			elseif boost.auraIds[entry.auraId] == true then
+				table.insert(themed, entry.auraId)
+			else
+				table.insert(unthemed, entry.auraId)
+				local factor = entry.chance / base
+				if unthemedFactor == nil then
+					unthemedFactor = factor
+				elseif not approx(factor, unthemedFactor, 1e-12) then
+					table.insert(untouchedProblems, string.format("%s / %s: %s moved by %s, the rest by %s", biomeId, scenario.label, entry.auraId, tostring(factor), tostring(unthemedFactor)))
+				end
+			end
+		end
+
+		for _, auraId in ipairs(themed) do
+			local base = chanceById(without, auraId) :: number
+			local withChance = chanceById(with, auraId) :: number
+			local relative = (withChance / base) / (unthemedFactor :: number)
+			if not approx(relative, 3, 1e-9) then
+				table.insert(ratioProblems, string.format("%s / %s: %s is %sx, not 3x", biomeId, scenario.label, auraId, string.format("%.6f", relative)))
+			end
+		end
+	end
+end
+check("every themed rung is exactly 3x its unthemed neighbours, under luck and soft pity", #ratioProblems == 0, table.concat(ratioProblems, "; "))
+check("no unthemed rung is individually affected - they all share one re-normalisation factor", #untouchedProblems == 0, table.concat(untouchedProblems, "; "))
+check("the distribution sums to exactly 1 with an event running (the weights still normalise)", #sumProblems == 0, table.concat(sumProblems, "; "))
+
+-- The luck still works while an event runs: composing must not mean replacing.
+-- At luck 50 the rarest themed rung is about 8.9x more likely than at luck 1 (the
+-- floor rung drains the pool as luck rises); the bound is deliberately loose so a
+-- balance change is not a test failure, while "luck did nothing" still is.
+local luckGap = chanceById(RollMath.ChanceTable(50, 0, BIOME_BOOSTS.Starfall), "Sovereign")
+	/ (chanceById(RollMath.ChanceTable(1, 0, BIOME_BOOSTS.Starfall), "Sovereign") :: number)
+check("luck still moves the odds while an event runs (it composes, it does not replace)", luckGap > 3, string.format("luck 50 vs luck 1: %.2fx", luckGap))
+
+--[[
+	Hard pity restricts the pool. An event does not un-restrict it, and a themed
+	rung below the pity floor simply is not in that pool - the boost is not a way
+	around the floor.
+]]
+local pityOdds = RollMath.ChanceTable(1, 99, BIOME_BOOSTS.BloodMoon)
+local pityWithout = RollMath.ChanceTable(1, 99, nil)
+local pityTotal = 0
+for _, entry in ipairs(pityOdds) do
+	pityTotal += entry.chance
+end
+-- Sunflare is the unthemed reference: it is in the hard-pity pool (1 in 1,500),
+-- which Frostbite and Static are not.
+local pityRelative = (chanceById(pityOdds, "Voidwalker") :: number / (chanceById(pityWithout, "Voidwalker") :: number))
+	/ (chanceById(pityOdds, "Sunflare") :: number / (chanceById(pityWithout, "Sunflare") :: number))
+check(
+	"under hard pity the themed rungs still in the pool are 3x, the rest of the pool is not",
+	math.abs(pityTotal - 1) < 1e-9 and approx(pityRelative, 3, 1e-9),
+	string.format("total=%s relative=%s", tostring(pityTotal), string.format("%.6f", pityRelative))
+)
+check(
+	"the hard-pity pool is exactly the rungs at or above the pity floor - an event does not widen it",
+	chanceById(pityOdds, "Frostbite") == nil
+		and chanceById(pityOdds, "Static") == nil
+		and chanceById(pityOdds, "Bloom") ~= nil
+		and chanceById(pityOdds, "Voidwalker") ~= nil,
+	string.format("pool size %d", #pityOdds)
+)
+check(
+	"a themed rung below the hard-pity floor is not in that pool at all (the event is not a way around pity)",
+	chanceById(pityOdds, "Ember") == nil and chanceById(pityOdds, "Ember") == nil,
+	if chanceById(pityOdds, "Ember") ~= nil then "Ember appeared in a hard-pity pool" else ""
+)
+
+--[[
+	The pool's FLOOR is the rung that the luck boost is deliberately exempt from, so
+	it is the one rung where the two factors interact. Ember (1 in 2) is Blood Moon's
+	floor, and "floor" must mean "exempt from luck", not "exempt from the event".
+]]
+local floorProblems: { string } = {}
+for _, luck in ipairs({ 1, 25, 500, 1e6 }) do
+	local without = RollMath.ChanceTable(luck, 0, nil)
+	local with = RollMath.ChanceTable(luck, 0, BIOME_BOOSTS.BloodMoon)
+	local emberBase = chanceById(without, "Ember") :: number
+	local emberWith = chanceById(with, "Ember") :: number
+	local otherBase = chanceById(without, "Frostbite") :: number
+	local otherWith = chanceById(with, "Frostbite") :: number
+	local relative = (emberWith / emberBase) / (otherWith / otherBase)
+	if not approx(relative, 3, 1e-9) then
+		table.insert(floorProblems, string.format("luck %s: floor rung is %sx", tostring(luck), string.format("%.6f", relative)))
+	end
+end
+check("the pool's floor rung is boosted exactly like any other themed rung (floor exempts luck, not events)", #floorProblems == 0, table.concat(floorProblems, "; "))
+
+--[[
+	What the DRAWN roll reports, and whether the draw really walked the boosted
+	weights. 40,000 rolls under Blood Moon, whose floor rung is themed: if the
+	multiply is dropped the themed share falls by ~1.6 points, which is ~7 standard
+	errors at this sample size, so the per-rung bound below is a real test of the
+draw and not just of the table it was built from.
+]]
+local SAMPLE_ROLLS = 40000
+local sampleBoost = BIOME_BOOSTS.BloodMoon
+local sampleOdds = RollMath.ChanceTable(1, 0, sampleBoost)
+local predicted: { [string]: number } = {}
+for _, entry in ipairs(sampleOdds) do
+	predicted[entry.auraId] = entry.chance
+end
+local counts: { [string]: number } = {}
+local source = RollMath.SequenceRandom(20261015)
+local idMismatches = 0
+local flagMismatches = 0
+local chanceMismatches = 0
+for _ = 1, SAMPLE_ROLLS do
+	local outcome = RollMath.SelectAura(1, 0, source, sampleBoost)
+	counts[outcome.auraId] = (counts[outcome.auraId] or 0) + 1
+
+	if outcome.biomeId ~= sampleBoost.id then
+		idMismatches += 1
+	end
+	if outcome.biomeBoosted ~= (sampleBoost.auraIds[outcome.auraId] == true) then
+		flagMismatches += 1
+	end
+	if not approx(outcome.chance, predicted[outcome.auraId] :: number, 1e-12) then
+		chanceMismatches += 1
+	end
+end
+check("every draw under an event reports that event as its own", idMismatches == 0, string.format("%d draws", idMismatches))
+check("biomeBoosted is true for exactly the themed rungs and no others", flagMismatches == 0, string.format("%d draws", flagMismatches))
+check("the drawn rung's reported chance is the event's own probability", chanceMismatches == 0, string.format("%d draws", chanceMismatches))
+
+local sampleProblems: { string } = {}
+for _, entry in ipairs(sampleOdds) do
+	local observed = counts[entry.auraId] or 0
+	local expected = entry.chance * SAMPLE_ROLLS
+	local deviation = math.sqrt(SAMPLE_ROLLS * entry.chance * (1 - entry.chance))
+	-- 4 sigma, plus a floor so a rung expected once is not held to a fractional count.
+	local allowed = 4 * deviation + 2
+	if math.abs(observed - expected) > allowed then
+		table.insert(sampleProblems, string.format("%s: drew %d, expected %.1f (+-%.1f)", entry.auraId, observed, expected, allowed))
+	end
+end
+check(
+	string.format("%d draws match the boosted table rung by rung (the draw walks the boosted weights)", SAMPLE_ROLLS),
+	#sampleProblems == 0,
+	table.concat(sampleProblems, "; ")
+)
+
+local observedThemed = 0
+for auraId, count in pairs(counts) do
+	if sampleBoost.auraIds[auraId] == true then
+		observedThemed += count
+	end
+end
+local unboostedThemed = shareOf(RollMath.ChanceTable(1, 0, nil), sampleBoost.auraIds)
+local observedShare = observedThemed / SAMPLE_ROLLS
+check(
+	"the event visibly lifts its themed share of pulls (x3 is not a rounding error)",
+	observedShare > unboostedThemed + 0.005,
+	string.format("observed %.4f vs unboosted %.4f", observedShare, unboostedThemed)
+)
+
+--[[
+	A roll that lands exactly on a switch. RollMath has no clock and no ambient
+	event: the boost is an argument, resolved for the whole pool before the first
+	weight is written, so a roll cannot be half one event and half the next. What
+	this asserts is that the outcome can only ever describe the event it was given.
+]]
+local crossProblems: { string } = {}
+for _, biomeId in ipairs(BIOME_IDS) do
+	local boost = BIOME_BOOSTS[biomeId]
+	local draws = RollMath.SequenceRandom(11)
+	for _ = 1, 2000 do
+		local outcome = RollMath.SelectAura(1, 0, draws, boost)
+		local themedBy = 0
+		for _, otherId in ipairs(BIOME_IDS) do
+			if BIOME_BOOSTS[otherId].auraIds[outcome.auraId] == true then
+				themedBy += 1
+			end
+		end
+		if outcome.biomeId ~= biomeId or themedBy > 1 then
+			table.insert(crossProblems, string.format("%s draw reported %s", biomeId, tostring(outcome.biomeId)))
+		elseif outcome.biomeBoosted and boost.auraIds[outcome.auraId] ~= true then
+			table.insert(crossProblems, string.format("%s draw boosted a rung it does not theme", biomeId))
+		end
+	end
+end
+check(
+	"a roll is resolved entirely under the event it was given - never half of each (2000 draws x 3 events)",
+	#crossProblems == 0,
+	table.concat(crossProblems, "; ")
+)
+
+--[[
+	Hostile and malformed boosts. The roll path has to stay total: every one of
+	these must behave as a plain roll, and - specifically - a boost must never be a
+	NERF, because a damaged config turning the game harder for five minutes is worse
+	than no event at all.
+]]
+local function matchesTable(boost: any, reference: { any }): boolean
+	local odds = RollMath.ChanceTable(1, 0, boost)
+	if #odds ~= #reference then
+		return false
+	end
+	for index, entry in ipairs(odds) do
+		if entry.auraId ~= reference[index].auraId or not approx(entry.chance, reference[index].chance, 1e-12) then
+			return false
+		end
+	end
+	return true
+end
+
+local plain = RollMath.ChanceTable(1, 0, nil)
+local starfallSansId = { multiplier = 3, auraIds = BIOME_BOOSTS.Starfall.auraIds }
+local capped = RollMath.ChanceTable(1, 0, { id = "X", multiplier = 100, auraIds = BIOME_BOOSTS.Starfall.auraIds })
+
+check("no event at all leaves the table untouched", matchesTable(nil, plain))
+check("a multiplier below 1 degrades to no event rather than becoming a nerf", matchesTable({ id = "Starfall", multiplier = 0.5, auraIds = BIOME_BOOSTS.Starfall.auraIds }, plain))
+check("a multiplier that is not a number degrades to no event", matchesTable({ id = "Starfall", multiplier = "3", auraIds = BIOME_BOOSTS.Starfall.auraIds }, plain))
+check("a NaN multiplier degrades to no event", matchesTable({ id = "Starfall", multiplier = 0 / 0, auraIds = BIOME_BOOSTS.Starfall.auraIds }, plain))
+check("an absent multiplier degrades to no event", matchesTable({ id = "Starfall", auraIds = BIOME_BOOSTS.Starfall.auraIds }, plain))
+check(
+	"an absurd multiplier is clamped to the constant instead of swallowing the pool",
+	matchesTable({ id = "X", multiplier = 1e9, auraIds = BIOME_BOOSTS.Starfall.auraIds }, capped)
+		and not matchesTable({ id = "X", multiplier = 1e9, auraIds = BIOME_BOOSTS.Starfall.auraIds }, plain),
+	"a 1e9 multiplier is not equal to the clamped table"
+)
+check(
+	"an event with no rungs weighs nothing (but still names itself)",
+	matchesTable({ id = "X", multiplier = 3, auraIds = {} }, plain)
+		and RollMath.SelectAura(1, 0, nil, { id = "X", multiplier = 3, auraIds = {} }).biomeId == "X",
+	"an empty themed set changed a weight"
+)
+check(
+	"a thematic rung id that is not on the ladder matches no entry",
+	matchesTable({ id = "X", multiplier = 3, auraIds = { NotAnAura = true } }, plain)
+)
+check(
+	"an aura list passed where a membership set belongs degrades to no event (not to a mis-weighing)",
+	matchesTable({ id = "X", multiplier = 3, auraIds = { "Ember" } }, plain)
+)
+check(
+	"an event with no id still weighs - the id is a label, the weights are the effect",
+	matchesTable(starfallSansId, RollMath.ChanceTable(1, 0, BIOME_BOOSTS.Starfall)),
+	"an anonymous event did not weigh like the named one"
+)
+check(
+	"an anonymous event reports no id, so a client can never badge a pull with it",
+	RollMath.SelectAura(1, 0, nil, starfallSansId).biomeId == nil
+)
+check("a plain roll reports no event", RollMath.SelectAura(1, 0, nil, nil).biomeId == nil and RollMath.SelectAura(1, 0, nil).biomeMultiplier == 1)
+
+-- Determinism under an event: the same seed and the same event give the same run.
+local function runIds(seed: number, boost: any, rolls: number): { string }
+	local draws = RollMath.SequenceRandom(seed)
+	local seen: { string } = {}
+	for _ = 1, rolls do
+		table.insert(seen, RollMath.SelectAura(1, 0, draws, boost).auraId)
+	end
+	return seen
+end
+
+local runA = runIds(4242, BIOME_BOOSTS.VoidEclipse, 500)
+local runB = runIds(4242, BIOME_BOOSTS.VoidEclipse, 500)
+local identical = #runA == #runB
+if identical then
+	for index, auraId in ipairs(runA) do
+		if auraId ~= runB[index] then
+			identical = false
+			break
+		end
+	end
+end
+check("the same seed under the same event reproduces the same 500 pulls", identical)
+
+local runC = runIds(4242, BIOME_BOOSTS.Starfall, 500)
+local differs = false
+for index, auraId in ipairs(runA) do
+	if auraId ~= runC[index] then
+		differs = true
+		break
+	end
+end
+check("a different event on the same seed draws a different run (the weights really differ)", differs)
 
 -- =============================================================================
 print("")

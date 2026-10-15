@@ -29,43 +29,65 @@ def load_world():
         r = c.R if hasattr(c, 'R') else (c.r / 255.0 if hasattr(c, 'r') else 0.5)
         g = c.G if hasattr(c, 'G') else (c.g / 255.0 if hasattr(c, 'g') else 0.5)
         b = c.B if hasattr(c, 'B') else (c.b / 255.0 if hasattr(c, 'b') else 0.5)
+        rot = np.eye(3)
+        if hasattr(p, 'CFrame') and hasattr(p.CFrame, 'R'):
+            R = p.CFrame.R
+            rot = np.array([
+                [float(R.r00), float(R.r01), float(R.r02)],
+                [float(R.r10), float(R.r11), float(R.r12)],
+                [float(R.r20), float(R.r21), float(R.r22)],
+            ])
         parts_data.append({
             'name': str(p.Name),
             'shape': str(p.Shape),
             'material': str(p.Material),
             'pos': np.array([float(p.Position.X), float(p.Position.Y), float(p.Position.Z)]),
             'size': np.array([float(p.Size.X), float(p.Size.Y), float(p.Size.Z)]),
+            'rot': rot,
             'color': (float(r), float(g), float(b)),
             'transparency': float(p.Transparency or 0),
         })
     return parts_data
 
+def get_oriented_box_faces(pos, size, rot):
+    hx, hy, hz = size[0] / 2.0, size[1] / 2.0, size[2] / 2.0
+    local_corners = np.array([
+        [-hx, -hy, -hz],
+        [ hx, -hy, -hz],
+        [ hx,  hy, -hz],
+        [-hx,  hy, -hz],
+        [-hx, -hy,  hz],
+        [ hx, -hy,  hz],
+        [ hx,  hy,  hz],
+        [-hx,  hy,  hz],
+    ])
+    world_corners = (rot @ local_corners.T).T + pos
+    plot_corners = np.zeros_like(world_corners)
+    plot_corners[:, 0] = world_corners[:, 0]
+    plot_corners[:, 1] = world_corners[:, 2] # Z
+    plot_corners[:, 2] = world_corners[:, 1] # Y
+    
+    c = plot_corners
+    return [
+        [c[0], c[1], c[2], c[3]],
+        [c[4], c[5], c[6], c[7]],
+        [c[0], c[1], c[5], c[4]],
+        [c[2], c[3], c[7], c[6]],
+        [c[0], c[3], c[7], c[4]],
+        [c[1], c[2], c[6], c[5]],
+    ]
+
 def render_spire_stairs(parts, out_path='tools/view_spire_stairs.png'):
-    # Only include Spire parts and mountain rock (filter out base island slabs)
-    focused = [p for p in parts if ('Spire' in p['name'] or 'Stair' in p['name'] or 'Astrolabe' in p['name'] or 'Flight' in p['name'] or 'Landing' in p['name']) and -2 <= p['pos'][1] <= 32]
+    focused = [p for p in parts if ('Spire' in p['name'] or 'Stair' in p['name'] or 'Astrolabe' in p['name'] or 'Flight' in p['name'] or 'Landing' in p['name'] or 'Observation' in p['name'] or 'Rotunda' in p['name']) and -2 <= p['pos'][1] <= 32]
 
     fig = plt.figure(figsize=(12, 10), dpi=120)
     ax = fig.add_subplot(111, projection='3d')
     ax.set_facecolor('#080a14')
 
     for p in focused:
-        px, py, pz = p['pos']
-        sx, sy, sz = p['size']
+        faces = get_oriented_box_faces(p['pos'], p['size'], p['rot'])
         c = p['color']
         alpha = max(0.4, 1.0 - p['transparency'])
-
-        x = [px - sx/2, px + sx/2]
-        y = [pz - sz/2, pz + sz/2]
-        z = [py - sy/2, py + sy/2]
-
-        faces = [
-            [[x[0], y[0], z[0]], [x[1], y[0], z[0]], [x[1], y[1], z[0]], [x[0], y[1], z[0]]],
-            [[x[0], y[0], z[1]], [x[1], y[0], z[1]], [x[1], y[1], z[1]], [x[0], y[1], z[1]]],
-            [[x[0], y[0], z[0]], [x[1], y[0], z[0]], [x[1], y[1], z[1]], [x[0], y[1], z[1]]],
-            [[x[0], y[1], z[0]], [x[1], y[1], z[0]], [x[1], y[1], z[1]], [x[0], y[1], z[1]]],
-            [[x[0], y[0], z[0]], [x[0], y[1], z[0]], [x[0], y[1], z[1]], [x[0], y[0], z[1]]],
-            [[x[1], y[0], z[0]], [x[1], y[1], z[0]], [x[1], y[1], z[1]], [x[1], y[0], z[1]]],
-        ]
         poly = Poly3DCollection(faces, facecolors=c, alpha=alpha, edgecolors='#333344', linewidths=0.5)
         ax.add_collection3d(poly)
 
@@ -85,7 +107,6 @@ def render_spire_stairs(parts, out_path='tools/view_spire_stairs.png'):
     print(f'Saved spire stairs view to {out_path}')
 
 def render_obby(parts, out_path='tools/view_obby.png'):
-    # Only include Obby and Peak parts
     focused = [p for p in parts if ('Obby' in p['name'] or 'Peak' in p['name'] or 'Treasure' in p['name']) and -2 <= p['pos'][1] <= 32]
 
     fig = plt.figure(figsize=(12, 10), dpi=120)
@@ -93,23 +114,9 @@ def render_obby(parts, out_path='tools/view_obby.png'):
     ax.set_facecolor('#080a14')
 
     for p in focused:
-        px, py, pz = p['pos']
-        sx, sy, sz = p['size']
+        faces = get_oriented_box_faces(p['pos'], p['size'], p['rot'])
         c = p['color']
         alpha = max(0.4, 1.0 - p['transparency'])
-
-        x = [px - sx/2, px + sx/2]
-        y = [pz - sz/2, pz + sz/2]
-        z = [py - sy/2, py + sy/2]
-
-        faces = [
-            [[x[0], y[0], z[0]], [x[1], y[0], z[0]], [x[1], y[1], z[0]], [x[0], y[1], z[0]]],
-            [[x[0], y[0], z[1]], [x[1], y[0], z[1]], [x[1], y[1], z[1]], [x[0], y[1], z[1]]],
-            [[x[0], y[0], z[0]], [x[1], y[0], z[0]], [x[1], y[1], z[1]], [x[0], y[1], z[1]]],
-            [[x[0], y[1], z[0]], [x[1], y[1], z[0]], [x[1], y[1], z[1]], [x[0], y[1], z[1]]],
-            [[x[0], y[0], z[0]], [x[0], y[1], z[0]], [x[0], y[1], z[1]], [x[0], y[0], z[1]]],
-            [[x[1], y[0], z[0]], [x[1], y[1], z[0]], [x[1], y[1], z[1]], [x[1], y[0], z[1]]],
-        ]
         poly = Poly3DCollection(faces, facecolors=c, alpha=alpha, edgecolors='#334466', linewidths=0.5)
         ax.add_collection3d(poly)
 

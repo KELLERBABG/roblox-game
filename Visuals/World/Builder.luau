@@ -16,6 +16,8 @@
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
+local Decals = require(script.Parent.Parent:WaitForChild("Decals") :: ModuleScript)
+
 local Builder = {}
 
 local ROOT_FOLDER_NAME = "SolSanctuary"
@@ -351,14 +353,22 @@ local function buildRollAltar(parent: Instance): Model
 	local summonRune = makePart({
 		Name = "SummonRuneDisc",
 		Shape = Enum.PartType.Cylinder,
-		Size = Vector3.new(0.08, 3.8, 3.8),
-		CFrame = CFrame.new(0, sigilY + 0.01, 0) * CFrame.Angles(0, 0, math.pi / 2),
+		Size = Vector3.new(0.08, 12.0, 12.0),
+		CFrame = CFrame.new(0, sigilY + 0.02, 0) * CFrame.Angles(0, 0, math.pi / 2),
 		Material = Enum.Material.Neon,
 		Color = Color3.fromRGB(115, 200, 255),
-		Transparency = 0.25,
+		Transparency = 0.45,
 		CanCollide = false,
 		Parent = altarModel,
 	})
+
+	local runeDecal = Instance.new("Decal")
+	runeDecal.Name = "AltarMagicSealDecal"
+	runeDecal.Texture = Decals.Textures.RunicCircle
+	runeDecal.Face = Enum.NormalId.Top
+	runeDecal.Color3 = Color3.fromRGB(160, 225, 255)
+	runeDecal.Transparency = 0.1
+	runeDecal.Parent = summonRune
 
 	local altarLight = Instance.new("PointLight")
 	altarLight.Name = "AltarCoreLight"
@@ -523,19 +533,23 @@ local function buildStargazerSpire(parent: Instance): Model
 	local spireModel = Instance.new("Model")
 	spireModel.Name = "StargazerSpire"
 
-	local deckCenter = Vector3.new(48.0, 20.5, -64.0)
+	local deckTopY = 20.5
+	local deckThickness = 1.0
+	local deckDiameter = 24.0
+	local deckRadius = deckDiameter / 2.0
+	local deckCenter = Vector3.new(48.0, deckTopY - deckThickness / 2.0, -66.0)
 
 	-- =========================================================================
 	-- 3A. Faceted Mountain Crags (Positioned behind and beneath the summit)
 	-- =========================================================================
 	local mountainCrags = {
 		-- Main mountain spine behind the observatory
-		{ s = Vector3.new(24, 28, 24), p = Vector3.new(64.0, 14.0, -64.0), r = 15, m = Enum.Material.Slate, c = Color3.fromRGB(54, 60, 76) },
-		{ s = Vector3.new(20, 22, 20), p = Vector3.new(62.0, 11.0, -48.0), r = -12, m = Enum.Material.Slate, c = Color3.fromRGB(58, 64, 82) },
-		{ s = Vector3.new(22, 24, 22), p = Vector3.new(50.0, 12.0, -78.0), r = 25, m = Enum.Material.Slate, c = Color3.fromRGB(52, 58, 74) },
+		{ s = Vector3.new(24, 28, 24), p = Vector3.new(64.0, 14.0, -66.0), r = 15, m = Enum.Material.Slate, c = Color3.fromRGB(54, 60, 76) },
+		{ s = Vector3.new(20, 22, 20), p = Vector3.new(62.0, 11.0, -50.0), r = -12, m = Enum.Material.Slate, c = Color3.fromRGB(58, 64, 82) },
+		{ s = Vector3.new(22, 24, 22), p = Vector3.new(50.0, 12.0, -80.0), r = 25, m = Enum.Material.Slate, c = Color3.fromRGB(52, 58, 74) },
 		-- Mossy terrace caps atop the rock ridges
-		{ s = Vector3.new(16, 1.2, 16), p = Vector3.new(64.0, 28.6, -64.0), r = 15, m = Enum.Material.LeafyGrass, c = Color3.fromRGB(48, 105, 78) },
-		{ s = Vector3.new(14, 1.2, 14), p = Vector3.new(62.0, 22.6, -48.0), r = -12, m = Enum.Material.LeafyGrass, c = Color3.fromRGB(48, 105, 78) },
+		{ s = Vector3.new(16, 1.2, 16), p = Vector3.new(64.0, 28.6, -66.0), r = 15, m = Enum.Material.LeafyGrass, c = Color3.fromRGB(48, 105, 78) },
+		{ s = Vector3.new(14, 1.2, 14), p = Vector3.new(62.0, 22.6, -50.0), r = -12, m = Enum.Material.LeafyGrass, c = Color3.fromRGB(48, 105, 78) },
 	}
 	for i, cr in ipairs(mountainCrags) do
 		makePart({
@@ -555,34 +569,41 @@ local function buildStargazerSpire(parent: Instance): Model
 	makePart({
 		Name = "RotundaBasementPier",
 		Shape = Enum.PartType.Cylinder,
-		Size = Vector3.new(10.0, 24.0, 24.0),
+		Size = Vector3.new(10.0, 22.0, 22.0),
 		CFrame = CFrame.new(deckCenter.X, 5.0, deckCenter.Z) * CFrame.Angles(0, 0, math.pi / 2),
 		Material = Enum.Material.Slate,
 		Color = Color3.fromRGB(50, 56, 72),
 		Parent = spireModel,
 	})
 
-	-- Temple Chamber Drum (Y = 10 to 20)
+	-- Temple Chamber Drum (Y = 10 to 19.5, set back so southern porch is wide open)
 	makePart({
 		Name = "RotundaTempleDrum",
 		Shape = Enum.PartType.Cylinder,
-		Size = Vector3.new(9.5, 18.0, 18.0),
-		CFrame = CFrame.new(deckCenter.X, 15.0, deckCenter.Z) * CFrame.Angles(0, 0, math.pi / 2),
+		Size = Vector3.new(9.5, 16.0, 16.0),
+		CFrame = CFrame.new(deckCenter.X, 14.75, deckCenter.Z) * CFrame.Angles(0, 0, math.pi / 2),
 		Material = Enum.Material.Granite,
 		Color = Color3.fromRGB(36, 40, 56),
 		Parent = spireModel,
 	})
 
-	-- 6 Fluted Marble Support Pillars around the Drum Perimeter
-	for col = 1, 6 do
-		local ang = (col - 1) * (math.pi / 3) + math.rad(15)
-		local colR = 10.5
+	-- 6 Fluted Marble Support Pillars symmetrically framing the stairway entrance
+	local colAngles = {
+		math.rad(60),   -- Front-East portal pillar
+		math.rad(120),  -- Front-West portal pillar
+		math.rad(0),    -- East flank pillar
+		math.rad(180),  -- West flank pillar
+		math.rad(-60),  -- Back-East pillar
+		math.rad(-120), -- Back-West pillar
+	}
+	for col, ang in ipairs(colAngles) do
+		local colR = 10.2
 		local colX = deckCenter.X + math.cos(ang) * colR
-		local colZ = deckCenter.Z + math.sin(ang) * colR
+		local colZ = deckCenter.Z - math.sin(ang) * colR
 
 		makePart({
 			Name = string.format("RotundaPillarBase_%d", col),
-			Size = Vector3.new(2.4, 0.8, 2.4),
+			Size = Vector3.new(2.2, 0.8, 2.2),
 			CFrame = CFrame.new(colX, 10.4, colZ),
 			Material = Enum.Material.Marble,
 			Color = Color3.fromRGB(225, 232, 248),
@@ -591,7 +612,7 @@ local function buildStargazerSpire(parent: Instance): Model
 		makePart({
 			Name = string.format("RotundaPillarShaft_%d", col),
 			Shape = Enum.PartType.Cylinder,
-			Size = Vector3.new(8.6, 1.4, 1.4),
+			Size = Vector3.new(8.6, 1.35, 1.35),
 			CFrame = CFrame.new(colX, 15.1, colZ) * CFrame.Angles(0, 0, math.pi / 2),
 			Material = Enum.Material.Marble,
 			Color = Color3.fromRGB(235, 240, 252),
@@ -599,7 +620,7 @@ local function buildStargazerSpire(parent: Instance): Model
 		})
 		makePart({
 			Name = string.format("RotundaPillarCapital_%d", col),
-			Size = Vector3.new(2.2, 0.8, 2.2),
+			Size = Vector3.new(2.1, 0.8, 2.1),
 			CFrame = CFrame.new(colX, 19.8, colZ),
 			Material = Enum.Material.Marble,
 			Color = Color3.fromRGB(225, 232, 248),
@@ -611,7 +632,7 @@ local function buildStargazerSpire(parent: Instance): Model
 	makePart({
 		Name = "ObservationDeck",
 		Shape = Enum.PartType.Cylinder,
-		Size = Vector3.new(1.2, 26, 26),
+		Size = Vector3.new(deckThickness, deckDiameter, deckDiameter),
 		CFrame = CFrame.new(deckCenter) * CFrame.Angles(0, 0, math.pi / 2),
 		Material = Enum.Material.Marble,
 		Color = Color3.fromRGB(225, 232, 248),
@@ -620,8 +641,8 @@ local function buildStargazerSpire(parent: Instance): Model
 	makePart({
 		Name = "ObservationStarDial",
 		Shape = Enum.PartType.Cylinder,
-		Size = Vector3.new(0.2, 20, 20),
-		CFrame = CFrame.new(deckCenter + Vector3.new(0, 0.65, 0)) * CFrame.Angles(0, 0, math.pi / 2),
+		Size = Vector3.new(0.12, 18.0, 18.0),
+		CFrame = CFrame.new(deckCenter.X, deckTopY + 0.06, deckCenter.Z) * CFrame.Angles(0, 0, math.pi / 2),
 		Material = Enum.Material.Granite,
 		Color = Color3.fromRGB(32, 36, 52),
 		Parent = spireModel,
@@ -629,8 +650,8 @@ local function buildStargazerSpire(parent: Instance): Model
 	makeHollowRing(
 		spireModel,
 		"DeckGoldCompassRing",
-		CFrame.new(deckCenter + Vector3.new(0, 0.78, 0)),
-		9.5,
+		CFrame.new(deckCenter.X, deckTopY + 0.14, deckCenter.Z),
+		8.5,
 		0.35,
 		0.12,
 		24,
@@ -643,22 +664,22 @@ local function buildStargazerSpire(parent: Instance): Model
 	-- 3C. Monumental Double-Flight Stone Staircase (100% Solid Risers & Balustrades)
 	-- =========================================================================
 
-	-- FLIGHT 1: Climbs +X from (34, 0.2, -40) to landing (48.5, 9.8, -40)
-	local f1Start = Vector3.new(34, 0.2, -40)
+	-- FLIGHT 1: Climbs +X from (28.0, 0.2, -40.0) to landing (44.0, 10.0, -40.0)
+	local f1Start = Vector3.new(28.0, 0.2, -40.0)
 	local f1Steps = 14
 	local stepWidth = 6.5
-	local stepDepth = 1.6
-	local stepRise = 0.68
+	local f1Depth = 1.15
+	local f1Rise = 0.70
 
 	for i = 1, f1Steps do
-		local x = f1Start.X + (i - 1) * 1.05
-		local y = f1Start.Y + i * stepRise
+		local x = f1Start.X + (i - 0.5) * f1Depth
+		local y = f1Start.Y + i * f1Rise
 		local z = f1Start.Z
 
 		-- White Marble Step Tread
 		makePart({
 			Name = string.format("StairF1_%d", i),
-			Size = Vector3.new(stepDepth, stepRise + 0.05, stepWidth),
+			Size = Vector3.new(f1Depth + 0.05, f1Rise + 0.05, stepWidth),
 			CFrame = CFrame.new(x, y, z),
 			Material = Enum.Material.Marble,
 			Color = Color3.fromRGB(225, 232, 248),
@@ -668,7 +689,7 @@ local function buildStargazerSpire(parent: Instance): Model
 		-- Solid Slate Bedrock Foundation under each step (zero gaps beneath)
 		makePart({
 			Name = string.format("StairRiserF1_%d", i),
-			Size = Vector3.new(stepDepth, y, stepWidth),
+			Size = Vector3.new(f1Depth + 0.05, y, stepWidth),
 			CFrame = CFrame.new(x, y / 2, z),
 			Material = Enum.Material.Slate,
 			Color = Color3.fromRGB(56, 62, 78),
@@ -679,7 +700,7 @@ local function buildStargazerSpire(parent: Instance): Model
 		local balustradeZ = z + (stepWidth / 2) + 0.35
 		makePart({
 			Name = string.format("BalustradeF1_%d", i),
-			Size = Vector3.new(stepDepth, 2.2, 0.7),
+			Size = Vector3.new(f1Depth + 0.05, 2.2, 0.7),
 			CFrame = CFrame.new(x, y + 1.1, balustradeZ),
 			Material = Enum.Material.Slate,
 			Color = Color3.fromRGB(68, 74, 92),
@@ -687,7 +708,7 @@ local function buildStargazerSpire(parent: Instance): Model
 		})
 		makePart({
 			Name = string.format("BalustradeCapF1_%d", i),
-			Size = Vector3.new(stepDepth + 0.1, 0.3, 0.85),
+			Size = Vector3.new(f1Depth + 0.1, 0.3, 0.85),
 			CFrame = CFrame.new(x, y + 2.3, balustradeZ),
 			Material = Enum.Material.Marble,
 			Color = Color3.fromRGB(225, 232, 248),
@@ -696,7 +717,7 @@ local function buildStargazerSpire(parent: Instance): Model
 	end
 
 	-- Entrance Brazier Pedestal at the Foot of Flight 1
-	local f1BrazierPos = Vector3.new(33.0, 0.2, -40 + (stepWidth / 2) + 0.35)
+	local f1BrazierPos = Vector3.new(27.0, 0.2, -40 + (stepWidth / 2) + 0.35)
 	makePart({
 		Name = "StairBrazierPedestal_1",
 		Size = Vector3.new(1.8, 3.2, 1.8),
@@ -722,40 +743,42 @@ local function buildStargazerSpire(parent: Instance): Model
 	f1Light.Brightness = 1.0
 	f1Light.Parent = f1Brazier
 
-	-- INTERMEDIATE LANDING TERRACE (48.5, 9.8, -44.5) - Monumental 8.5x8.5 Pavilion
-	local landingCenter = Vector3.new(48.5, 9.8, -44.5)
+	-- INTERMEDIATE LANDING TERRACE (48.0, 9.5, -40.0) - Monumental 8.0x8.0 Pavilion
+	local landingCenter = Vector3.new(48.0, 9.5, -40.0)
 	makePart({
 		Name = "StairLandingTerrace",
-		Size = Vector3.new(8.5, 1.2, 8.5),
+		Size = Vector3.new(8.0, 1.0, 8.0),
 		CFrame = CFrame.new(landingCenter),
 		Material = Enum.Material.Marble,
 		Color = Color3.fromRGB(225, 232, 248),
 		Parent = spireModel,
 	})
-	-- Solid Foundation Pier all the way to bedrock (Y = 0 to 9.8)
+	-- Solid Foundation Pier all the way to bedrock (Y = 0 to 9.5)
 	makePart({
 		Name = "LandingFoundationPier",
-		Size = Vector3.new(8.5, 9.8, 8.5),
-		CFrame = CFrame.new(landingCenter.X, 4.9, landingCenter.Z),
+		Size = Vector3.new(8.0, 9.5, 8.0),
+		CFrame = CFrame.new(landingCenter.X, 4.75, landingCenter.Z),
 		Material = Enum.Material.Slate,
 		Color = Color3.fromRGB(56, 62, 78),
 		Parent = spireModel,
 	})
 
-	-- FLIGHT 2: Turns left and climbs -Z from landing (48.5, 9.8, -48) to observation deck (48.5, 20.0, -58)
-	local f2Start = Vector3.new(48.5, 9.8, -48.0)
-	local f2Steps = 14
-	local stepRise2 = 0.72
+	-- FLIGHT 2: Turns left and climbs North along -Z from landing to the Observation Deck entrance!
+	-- Starts at Z = -44.0, Y = 10.0 and climbs smoothly to Z = -54.0, Y = 20.5 (exact southern edge of deck!)
+	local f2Start = Vector3.new(48.0, 10.0, -44.0)
+	local f2Steps = 11
+	local f2Rise = 0.954
+	local f2Depth = 0.909
 
 	for i = 1, f2Steps do
 		local x = f2Start.X
-		local y = f2Start.Y + i * stepRise2
-		local z = f2Start.Z - (i - 1) * 0.95
+		local y = f2Start.Y + i * f2Rise
+		local z = f2Start.Z - (i - 0.5) * f2Depth
 
 		-- White Marble Step Tread
 		makePart({
 			Name = string.format("StairF2_%d", i),
-			Size = Vector3.new(stepWidth, stepRise2 + 0.05, stepDepth),
+			Size = Vector3.new(stepWidth, f2Rise + 0.05, f2Depth + 0.05),
 			CFrame = CFrame.new(x, y, z),
 			Material = Enum.Material.Marble,
 			Color = Color3.fromRGB(225, 232, 248),
@@ -766,7 +789,7 @@ local function buildStargazerSpire(parent: Instance): Model
 		local riserHeight = y - f2Start.Y
 		makePart({
 			Name = string.format("StairRiserF2_%d", i),
-			Size = Vector3.new(stepWidth, riserHeight, stepDepth),
+			Size = Vector3.new(stepWidth, riserHeight, f2Depth + 0.05),
 			CFrame = CFrame.new(x, f2Start.Y + riserHeight / 2, z),
 			Material = Enum.Material.Slate,
 			Color = Color3.fromRGB(56, 62, 78),
@@ -777,7 +800,7 @@ local function buildStargazerSpire(parent: Instance): Model
 		local balustradeX = x - (stepWidth / 2) - 0.35
 		makePart({
 			Name = string.format("BalustradeF2_%d", i),
-			Size = Vector3.new(0.7, 2.2, stepDepth),
+			Size = Vector3.new(0.7, 2.2, f2Depth + 0.05),
 			CFrame = CFrame.new(balustradeX, y + 1.1, z),
 			Material = Enum.Material.Slate,
 			Color = Color3.fromRGB(68, 74, 92),
@@ -785,7 +808,7 @@ local function buildStargazerSpire(parent: Instance): Model
 		})
 		makePart({
 			Name = string.format("BalustradeCapF2_%d", i),
-			Size = Vector3.new(0.85, 0.3, stepDepth + 0.1),
+			Size = Vector3.new(0.85, 0.3, f2Depth + 0.1),
 			CFrame = CFrame.new(balustradeX, y + 2.3, z),
 			Material = Enum.Material.Marble,
 			Color = Color3.fromRGB(225, 232, 248),
@@ -793,11 +816,11 @@ local function buildStargazerSpire(parent: Instance): Model
 		})
 	end
 
-	-- Solid Masonry Buttress beneath Flight 2 filling down to ground level
+	-- Solid Masonry Vault beneath Flight 2 filling down to ground level
 	makePart({
 		Name = "Flight2UnderbellyVault",
-		Size = Vector3.new(stepWidth + 1.0, 9.8, 14.0),
-		CFrame = CFrame.new(f2Start.X, 4.9, f2Start.Z - 6.5),
+		Size = Vector3.new(stepWidth, 10.0, 10.0),
+		CFrame = CFrame.new(f2Start.X, 5.0, -49.0),
 		Material = Enum.Material.Slate,
 		Color = Color3.fromRGB(52, 58, 74),
 		Parent = spireModel,
@@ -997,10 +1020,19 @@ local function buildMysticGrotto(parent: Instance): Model
 		CFrame = CFrame.new(potPos + Vector3.new(0, 2.85, 0)) * CFrame.Angles(0, 0, math.pi / 2),
 		Material = Enum.Material.Neon,
 		Color = Color3.fromRGB(160, 85, 255),
-		Transparency = 0.2,
+		Transparency = 0.25,
 		CanCollide = false,
 		Parent = grottoModel,
 	})
+
+	local cauldronDecal = Instance.new("Decal")
+	cauldronDecal.Name = "CauldronVortexDecal"
+	cauldronDecal.Texture = Decals.Textures.AbyssalVortex
+	cauldronDecal.Face = Enum.NormalId.Top
+	cauldronDecal.Color3 = Color3.fromRGB(190, 110, 255)
+	cauldronDecal.Transparency = 0.15
+	cauldronDecal.Parent = liquid
+
 	local brewLight = Instance.new("PointLight")
 	brewLight.Color = Color3.fromRGB(175, 95, 255)
 	brewLight.Range = 16
@@ -1137,6 +1169,39 @@ local function buildFloatingObby(parent: Instance): Model
 			Parent = obbyModel,
 		})
 
+		-- Bedrock Underbelly Foundation Collar under each pad
+		makePart({
+			Name = string.format("ObbyPadUnderbelly_%d", i),
+			Shape = Enum.PartType.Cylinder,
+			Size = Vector3.new(1.6, 6.2, 6.2),
+			CFrame = CFrame.new(padPos - Vector3.new(0, 1.4, 0)) * CFrame.Angles(0, 0, math.pi / 2),
+			Material = Enum.Material.Slate,
+			Color = Color3.fromRGB(50, 56, 72),
+			Parent = obbyModel,
+		})
+
+		-- Inverted Bioluminescent Crystal Stalactite descending into the sky abyss
+		makePart({
+			Name = string.format("ObbyStalactite_%d", i),
+			Shape = Enum.PartType.Ball,
+			Size = Vector3.new(2.4, 5.5, 2.4),
+			CFrame = CFrame.new(padPos - Vector3.new(0, 3.8, 0)),
+			Material = Enum.Material.Neon,
+			Color = if i % 2 == 1 then Color3.fromRGB(90, 205, 255) else Color3.fromRGB(255, 205, 95),
+			Transparency = 0.2,
+			CanCollide = false,
+			Parent = obbyModel,
+		})
+
+		-- Celestial Star Glyph on the Pad Floor
+		local starDecal = Instance.new("Decal")
+		starDecal.Name = "ObbyStarGlyph"
+		starDecal.Texture = Decals.Textures.CelestialStar
+		starDecal.Face = Enum.NormalId.Top
+		starDecal.Color3 = Color3.fromRGB(160, 220, 255)
+		starDecal.Transparency = 0.2
+		starDecal.Parent = pad
+
 		makeHollowRing(
 			obbyModel,
 			string.format("ObbyRim_%d", i),
@@ -1152,8 +1217,8 @@ local function buildFloatingObby(parent: Instance): Model
 
 		local pLight = Instance.new("PointLight")
 		pLight.Color = Color3.fromRGB(110, 195, 255)
-		pLight.Range = 12
-		pLight.Brightness = 0.65
+		pLight.Range = 14
+		pLight.Brightness = 0.75
 		pLight.Parent = pad
 	end
 
@@ -1161,7 +1226,7 @@ local function buildFloatingObby(parent: Instance): Model
 	-- Large 20-stud wide dais at the end of the obby
 	local peakPos = Vector3.new(0, 1.2 + numPads * 1.25 + 0.8, startZ + numPads * stepZ - 5.0)
 
-	makePart({
+	local peakDais = makePart({
 		Name = "PeakDais",
 		Shape = Enum.PartType.Cylinder,
 		Size = Vector3.new(2.2, 20, 20),
@@ -1170,6 +1235,14 @@ local function buildFloatingObby(parent: Instance): Model
 		Color = Color3.fromRGB(36, 40, 58),
 		Parent = obbyModel,
 	})
+
+	local peakDecal = Instance.new("Decal")
+	peakDecal.Name = "PeakSigilDecal"
+	peakDecal.Texture = Decals.Textures.HolySigil
+	peakDecal.Face = Enum.NormalId.Top
+	peakDecal.Color3 = Color3.fromRGB(255, 220, 120)
+	peakDecal.Transparency = 0.15
+	peakDecal.Parent = peakDais
 
 	makeHollowRing(
 		obbyModel,

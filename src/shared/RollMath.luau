@@ -33,6 +33,21 @@
 	  * Hard pity  : on the HARD_PITY_ROLLS-th consecutive roll the pool is
 	                 restricted to auras with rarity >= HARD_PITY_MIN_RARITY,
 	                 which guarantees the pull.
+
+	BIOME EVENTS (the third weight factor)
+	---------------------------------------
+	A time-gated biome event multiplies the WEIGHT of a themed subset of the
+	ladder, so it enters here - inside the one weight vector that everything else
+	already flows through - and nowhere else. `BiomeBoost` is passed in as data:
+	this module never learns what "Starfall" is, which auras it likes or when it
+	runs, so there is no second selection path and no per-aura case outside the
+	biome's own config.
+
+	Why a WEIGHT and not a probability: the pool is normalised by its own total, so
+	a 3x weight is exactly a 3x ratio between a themed and an unthemed rung at the
+	same starting weight, whatever else is stacked on top. Multiplying, like luck
+	and the pity ramp, is what lets the themed and unthemed parts re-normalise
+	against each other instead of the boost cancelling out.
 ]]
 
 export type RegistryEntry = {
@@ -49,6 +64,18 @@ export type RegistryLike = {
 
 export type RandomSource = () -> number
 
+--[[
+	A biome event, as the roll path sees it: an id to report, a weight multiplier,
+	and the themed aura ids as a membership SET (this loop runs per entry, on every
+	roll). Built by BiomeMath from BiomeConfig; RollMath only weighs what it is
+	given.
+]]
+export type BiomeBoost = {
+	id: string,
+	multiplier: number,
+	auraIds: { [string]: boolean },
+}
+
 export type Constants = {
 	softPityInterval: number,
 	softPityStep: number,
@@ -57,6 +84,10 @@ export type Constants = {
 	hardPityMinRarity: number,
 	minLuck: number,
 	maxLuck: number,
+	-- Ceiling for a biome weight factor. A boost is a boost: a multiplier below 1
+	-- degrades to "no boost" rather than becoming a hidden nerf, and an absurd one
+	-- (a damaged config) is clamped instead of swallowing the pool.
+	maxBiomeMultiplier: number,
 }
 
 export type RollOutcome = {
@@ -71,6 +102,11 @@ export type RollOutcome = {
 	hardPityTriggered: boolean,
 	rollsSinceRare: number,
 	poolSize: number,
+	-- The biome event this roll was resolved under, if any, and whether THIS
+	-- aura was one of its themed rungs.
+	biomeId: string?,
+	biomeMultiplier: number,
+	biomeBoosted: boolean,
 }
 
 export type OddsEntry = {
@@ -105,6 +141,8 @@ local CONSTANTS: Constants = {
 
 	minLuck = 0.01,
 	maxLuck = 1e6,
+
+	maxBiomeMultiplier = 100,
 }
 
 -- =============================================================================
@@ -193,9 +231,46 @@ type Pool = {
 	luckUsed: number,
 	softPityStacks: number,
 	hardPityTriggered: boolean,
+	-- The resolved biome factor this pool was built with (1 and nil when no event
+	-- is running), reported through the outcome so a roll can be labelled with the
+	-- event it actually happened under.
+	biomeId: string?,
+	biomeMultiplier: number,
+	biomeBoostedIds: { [string]: boolean },
+	biomeBoostedCount: number,
+	floorRarity: number,
 }
 
-local function buildPool(luckMultiplier: number, pityCount: number): Pool
+type ResolvedBiome = {
+	id: string?,
+	multiplier: number,
+	auraIds: { [string]: boolean },
+}
+
+--[[
+	resolveBiome(biome)
+
+	Turns whatever the caller passed into something total to weigh with. An absent
+	or malformed boost resolves to "no event": 1x, no themed auras, nil id. A
+	boost is never allowed to become a penalty (see maxBiomeMultiplier).
+]]
+local function resolveBiome(biome: BiomeBoost?): ResolvedBiome
+	local empty: { [string]: boolean } = {}
+	if biome == nil or type(biome) ~= "table" then
+		return { id = nil, multiplier = 1, auraIds = empty }
+	end
+
+	local multiplier = sanitizeNumber(biome.multiplier, 1, 1, CONSTANTS.maxBiomeMultiplier)
+	local auraIds = biome.auraIds
+	if type(auraIds) ~= "table" then
+		auraIds = empty
+	end
+
+	local id = if type(biome.id) == "string" and biome.id ~= "" then biome.id else nil
+	return { id = id, multiplier = multiplier, auraIds = auraIds }
+end
+
+local function buildPool(luckMultiplier: number, pityCount: number, biome: BiomeBoost?): Pool
 	local registry = loadRegistry()
 
 	local safeLuck = sanitizeNumber(luckMultiplier, 1, CONSTANTS.minLuck, CONSTANTS.maxLuck)
@@ -246,8 +321,14 @@ local function buildPool(luckMultiplier: number, pityCount: number): Pool
 		end
 	end
 
+	-- The biome factor is resolved ONCE, before the weight loop, so every entry in
+	-- this pool is weighed against the same event and a roll that happens to land
+	-- on a switch is resolved entirely under one of the two, never half of each.
+	local resolvedBiome = resolveBiome(biome)
+
 	local weights: { number } = table.create(#entries)
 	local total = 0
+	local boostedCount = 0
 	for index, entry in ipairs(entries) do
 		local effectiveRarity = entry.rarity
 		if entry.rarity > floorRarity then
@@ -258,6 +339,16 @@ local function buildPool(luckMultiplier: number, pityCount: number): Pool
 		end
 
 		local weight = 1 / effectiveRarity
+
+		-- The third factor, applied exactly the way the other two are: a multiply
+		-- on this entry's weight. Themed rungs become `multiplier` times as likely
+		-- RELATIVE to an unthemed rung, and the pool's total carries the rest - so
+		-- the distribution still sums to 1 with the event running.
+		if resolvedBiome.multiplier > 1 and resolvedBiome.auraIds[entry.id] == true then
+			weight *= resolvedBiome.multiplier
+			boostedCount += 1
+		end
+
 		weights[index] = weight
 		total += weight
 	end
@@ -269,6 +360,11 @@ local function buildPool(luckMultiplier: number, pityCount: number): Pool
 		luckUsed = luckUsed,
 		softPityStacks = stacks,
 		hardPityTriggered = hardPityTriggered,
+		biomeId = resolvedBiome.id,
+		biomeMultiplier = resolvedBiome.multiplier,
+		biomeBoostedIds = resolvedBiome.auraIds,
+		biomeBoostedCount = boostedCount,
+		floorRarity = floorRarity,
 	}
 end
 
@@ -363,9 +459,10 @@ end
 function RollMath.SelectAura(
 	luckMultiplier: number,
 	pityCount: number,
-	random: RandomSource?
+	random: RandomSource?,
+	biome: BiomeBoost?
 ): (RollOutcome, RegistryEntry)
-	local pool = buildPool(luckMultiplier, pityCount)
+	local pool = buildPool(luckMultiplier, pityCount, biome)
 	local source = sanitizeRandom(random)
 	local index = pickIndex(pool, source())
 
@@ -387,6 +484,11 @@ function RollMath.SelectAura(
 		hardPityTriggered = pool.hardPityTriggered,
 		rollsSinceRare = math.max(0, math.floor(sanitizeNumber(pityCount, 0, 0, 1e9))),
 		poolSize = #pool.entries,
+		biomeId = pool.biomeId,
+		biomeMultiplier = pool.biomeMultiplier,
+		-- Was THIS pull one of the event's rungs? Distinct from "an event is on",
+		-- and the only thing the reveal should badge.
+		biomeBoosted = pool.biomeMultiplier > 1 and pool.biomeBoostedIds[chosen.id] == true,
 	}
 
 	return outcome, chosen
@@ -398,8 +500,8 @@ end
 	Every aura's real probability for the *next* roll, rarest first. Purely
 	informational - useful for odds panels and for asserting pity behaviour.
 ]]
-function RollMath.ChanceTable(luckMultiplier: number, pityCount: number): { OddsEntry }
-	local pool = buildPool(luckMultiplier, pityCount)
+function RollMath.ChanceTable(luckMultiplier: number, pityCount: number, biome: BiomeBoost?): { OddsEntry }
+	local pool = buildPool(luckMultiplier, pityCount, biome)
 	local table_: { OddsEntry } = table.create(#pool.entries)
 
 	for index, entry in ipairs(pool.entries) do
@@ -422,8 +524,15 @@ function RollMath.ChanceTable(luckMultiplier: number, pityCount: number): { Odds
 end
 
 -- Probability of pulling anything at rarity >= minRarity on the next roll.
-function RollMath.ChanceOfAtLeast(minRarity: number, luckMultiplier: number, pityCount: number): number
-	local odds = RollMath.ChanceTable(luckMultiplier, pityCount)
+-- Takes the biome too: an expectation computed during an event has to include the
+-- event, or the session's telemetry would drift for five minutes at a time.
+function RollMath.ChanceOfAtLeast(
+	minRarity: number,
+	luckMultiplier: number,
+	pityCount: number,
+	biome: BiomeBoost?
+): number
+	local odds = RollMath.ChanceTable(luckMultiplier, pityCount, biome)
 	local total = 0
 	for _, entry in ipairs(odds) do
 		if entry.rarity >= minRarity then
@@ -457,7 +566,12 @@ end
 	distribution. This is the function the terminal test harness exercises, and
 	it is also handy for balancing tiers without launching Roblox.
 ]]
-function RollMath.Simulate(rollCount: number, luckMultiplier: number?, random: RandomSource?): SimulationReport
+function RollMath.Simulate(
+	rollCount: number,
+	luckMultiplier: number?,
+	random: RandomSource?,
+	biome: BiomeBoost?
+): SimulationReport
 	local total = math.max(0, math.floor(sanitizeNumber(rollCount, 0, 0, 1e9)))
 	local luck = sanitizeNumber(luckMultiplier, 1, CONSTANTS.minLuck, CONSTANTS.maxLuck)
 	local source = sanitizeRandom(random)
@@ -473,7 +587,7 @@ function RollMath.Simulate(rollCount: number, luckMultiplier: number?, random: R
 	local bestAuraId: string? = nil
 
 	for _ = 1, total do
-		local outcome = RollMath.SelectAura(luck, pity, source)
+		local outcome = RollMath.SelectAura(luck, pity, source, biome)
 
 		counts[outcome.auraId] = (counts[outcome.auraId] or 0) + 1
 		rarityCounts[outcome.rarity] = (rarityCounts[outcome.rarity] or 0) + 1
